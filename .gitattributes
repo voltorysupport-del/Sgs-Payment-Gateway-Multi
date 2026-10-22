@@ -1,0 +1,2 @@
+# Keep line endings consistent (important for the shell script in .githooks on Windows)
+* text=auto eol=lf

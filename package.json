@@ -1,0 +1,51 @@
+{
+  "name": "vaultx-pay",
+  "version": "0.1.0",
+  "description": "VaultX Pay - multi-operator payment gateway (Version 1: simulated payments only)",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test",
+    "secrets:scan": "gitleaks git --redact --verbose .",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres",
+    "hooks:install": "git config core.hooksPath .githooks",
+    "prepare": "node -e \"if (require('fs').existsSync('.git')) require('child_process').execSync('git config core.hooksPath .githooks')\""
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "pino": "^9.7.0",
+    "pino-http": "^10.5.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.18.0",
+    "@types/supertest": "^6.0.3",
+    "eslint": "^9.36.0",
+    "eslint-config-prettier": "^10.1.8",
+    "pino-pretty": "^13.1.0",
+    "prettier": "^3.6.0",
+    "supertest": "^7.1.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.2",
+    "typescript-eslint": "^8.44.0",
+    "vitest": "^4.1.12"
+  }
+}

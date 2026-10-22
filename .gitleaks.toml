@@ -1,0 +1,13 @@
+# gitleaks configuration: scans for secrets (API keys, passwords, private keys).
+# Uses gitleaks' full built-in rule set, plus a rule for VaultX Pay's own key format.
+
+title = "VaultX Pay gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "vaultx-pay-api-key"
+description = "VaultX Pay operator API key"
+regex = '''vxp_(test|live)_[A-Za-z0-9]{24,}'''
+keywords = ["vxp_test_", "vxp_live_"]

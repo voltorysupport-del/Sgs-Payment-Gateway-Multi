@@ -1,0 +1,28 @@
+#!/bin/sh
+# Pre-commit secret scan.
+# Runs automatically before every "git commit" and blocks the commit if a
+# secret (API key, password, private key...) is found in the staged changes.
+#
+# Enabled automatically by "npm install" (or manually: npm run hooks:install).
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo ""
+  echo "  [VaultX Pay] Commit blocked: gitleaks is not installed."
+  echo "  It scans every commit for secrets. Install it, then commit again:"
+  echo "    macOS:   brew install gitleaks"
+  echo "    Windows: winget install --id Gitleaks.Gitleaks"
+  echo "    Linux:   https://github.com/gitleaks/gitleaks#installing"
+  echo ""
+  exit 1
+fi
+
+gitleaks git --pre-commit --staged --redact --verbose
+status=$?
+
+if [ $status -ne 0 ]; then
+  echo ""
+  echo "  [VaultX Pay] Commit blocked: a possible secret was found (see above)."
+  echo "  Remove it from the file, keep real values only in .env, then commit again."
+  echo ""
+  exit 1
+fi
