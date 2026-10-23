@@ -9,5 +9,5 @@ useDefault = true
 [[rules]]
 id = "vaultx-pay-api-key"
 description = "VaultX Pay operator API key"
-regex = '''vxp_(test|live)_[A-Za-z0-9]{24,}'''
-keywords = ["vxp_test_", "vxp_live_"]
+regex = '''vxp_([a-f0-9]{64}|(test|live)_[A-Za-z0-9]{24,})'''
+keywords = ["vxp_"]

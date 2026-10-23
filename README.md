@@ -10,6 +10,8 @@ A multi-operator payment gateway, designed initially for the iGaming industry.
 > what has and has not been verified.
 
 See [Payment API](docs/payments.md) for the lifecycle, authorization, and retry behavior.
+See [Staging operator provisioning](docs/staging-provisioning.md) for administrator-only
+key issuance, secure one-time delivery, rotation/revocation, and Windows CMD instructions.
 The original Step 1 review notes are historical; current verification commands are in
 [Safe automated testing](docs/testing.md).
 

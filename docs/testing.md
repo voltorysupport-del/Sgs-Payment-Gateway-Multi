@@ -130,3 +130,10 @@ or external database is required.
 
 Payment processing code, application migrations, development Docker configuration,
 and live-payment restrictions are unchanged.
+
+The staging provisioning tests also use a separate `vaultx_pay_staging` database
+inside this same disposable cluster, with an administrator-set staging designation.
+They derive its connection only from the verified disposable test connection.
+The provisioning CLI refuses the ordinary test database. Both databases must have
+zero operator/key/payment fixtures at the end of a successful test run. No Render
+database is used. See [staging-provisioning.md](staging-provisioning.md).

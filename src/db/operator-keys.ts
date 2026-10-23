@@ -7,6 +7,12 @@ function hashApiKey(apiKey: string): string {
   return createHash('sha256').update(apiKey, 'utf8').digest('hex');
 }
 
+/** Shared issuance format/verifier for HTTP authentication and administrative tools. */
+export function generateOperatorApiKey(): { apiKey: string; keyHash: string } {
+  const apiKey = `${API_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+  return { apiKey, keyHash: hashApiKey(apiKey) };
+}
+
 export interface IssuedOperatorKey {
   operatorId: string;
   keyId: string;
@@ -21,8 +27,7 @@ export async function createOperatorWithApiKey(
 ): Promise<IssuedOperatorKey> {
   const operatorId = randomUUID();
   const keyId = randomUUID();
-  const apiKey = `${API_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
-  const keyHash = hashApiKey(apiKey);
+  const { apiKey, keyHash } = generateOperatorApiKey();
 
   const client = await pool.connect();
 
