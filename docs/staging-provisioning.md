@@ -8,12 +8,49 @@ enables real payments, calls a provider, or creates database migrations.
 No actual Render credentials are included or provisioned by this change. All
 automated verification uses a freshly created disposable PostgreSQL cluster.
 
+## Render endpoint compatibility (reviewed 2026-10-23)
+
+**Use the full external Render PostgreSQL hostname for administration from Windows.**
+The internal URL is reachable only by eligible Render services in the same account
+and region. A normal Windows computer cannot use that private address. Render also
+documents self-signed certificates for internal PostgreSQL TLS and no support for
+`verify-ca`/`verify-full` on that endpoint. Moving this CLI into Render or tunnelling
+to the private endpoint does not by itself fix certificate identity verification.
+
+Consequently, the internal URL is **incompatible with this CLI's strict verified-TLS
+policy**. It is not a PostgreSQL 17/schema issue. Recognized Render internal hostnames
+are refused before connecting. There is no `rejectUnauthorized=false`, trust-on-first-use,
+`sslmode=require`, or plaintext fallback for Render. Do not extract a certificate
+from an unverified connection and treat it as trusted.
+
+For a future approved administration session, obtain the **external** connection URL
+privately from the database's Connect menu and independently confirm its full DNS
+hostname and username. Do not substitute a resolved IP or the internal hostname.
+This CLI uses TLS 1.2 or newer, certificate-chain and hostname verification, and
+hostname SNI. It permits no URL SSL option except `sslmode=verify-full`; if a copied
+URL includes `sslmode=require`, change only that option to `verify-full` privately
+before use. Node uses its trusted CA roots; an approved CA bundle can extend them
+through `NODE_EXTRA_CA_CERTS`. Never disable verification to bypass an error.
+
+The administrator's existing network access must allow the external endpoint. If
+external access is disabled or the administrator IP is not permitted, this workflow
+is blocked until a separately approved access arrangement exists. Do not open access
+to all IPs, alter Render settings, or use the internal URL as a workaround. The
+application's own private `DATABASE_URL` in Render is unchanged; choose the external
+URL only in the administrator's local process.
+
+These conclusions follow from [Render's connection and TLS documentation](https://render.com/docs/postgresql-creating-connecting#internal-connections)
+and [external connection requirements](https://render.com/docs/postgresql-creating-connecting#external-connections).
+No actual Render connection, certificate handshake, credentials, or settings were
+inspected. Compatibility with a particular private database's permissions/network
+rules still requires an approved administrator check later.
+
 ## Before connecting to staging
 
 1. Review and merge/deploy through your normal approval process. This command is
    available after `npm ci --include=dev` and `npm run build`; its entry point is
    `node dist/cli/staging-operator.js` (`npm run staging:operator -- ...`).
-2. Independently identify the staging database host and database username from
+2. Independently identify the full **external** staging database host and database username from
    your approved infrastructure inventory. The database must be named exactly
    **vaultx_pay_staging**. Never designate a production database as staging.
 3. Have the database owner verify the target and set this nonsecret designation
@@ -41,7 +78,7 @@ password-prompted TLS connection without putting credentials in command history:
 
 ```bat
 set "PGSSLMODE=verify-full"
-psql -h YOUR_STAGING_HOST -U YOUR_STAGING_DATABASE_USER -d vaultx_pay_staging -W
+psql -h YOUR_FULL_EXTERNAL_STAGING_HOST -U YOUR_STAGING_DATABASE_USER -d vaultx_pay_staging -W
 ```
 
 Use the SQL above only after independently verifying the connection. Do not use
@@ -50,6 +87,11 @@ require certificate validation; use a trusted TLS hostname and, when necessary,
 `NODE_EXTRA_CA_CERTS` pointing to an approved CA certificate. Do not disable TLS
 verification. Only the literal loopback host `127.0.0.1` permits plaintext for
 local disposable/staging infrastructure.
+
+`NODE_EXTRA_CA_CERTS` applies to Node, not `psql`. For PostgreSQL command-line
+tools, use their trusted root configuration (for example, `PGSSLROOTCERT` pointing
+to an approved CA bundle) while keeping `PGSSLMODE=verify-full`. A CA error is a
+reason to verify the hostname and approved trust configuration, never to downgrade.
 
 ## Beginner-friendly Windows CMD setup
 
@@ -70,7 +112,7 @@ use NODE_ENV=production for runtime safety:
 set "NODE_ENV=production"
 set "VAULTX_ENVIRONMENT=staging"
 set "ALLOW_STAGING_OPERATOR_PROVISIONING=true"
-set "STAGING_DATABASE_HOST=YOUR_STAGING_HOST"
+set "STAGING_DATABASE_HOST=YOUR_FULL_EXTERNAL_STAGING_HOST"
 set "STAGING_DATABASE_USER=YOUR_STAGING_DATABASE_USER"
 set "LIVE_MODE_ENABLED=false"
 set "ALLOWED_PROVIDERS=simulator"
@@ -85,7 +127,7 @@ history and does not get saved in a file. Obtain the URL privately from your
 approved secret store. Do not use a recorded/shared terminal session:
 
 ```powershell
-$secret = Read-Host 'Private staging DATABASE_URL' -AsSecureString
+$secret = Read-Host 'Private staging EXTERNAL DATABASE_URL' -AsSecureString
 $env:DATABASE_URL = [Net.NetworkCredential]::new('', $secret).Password
 $initial = Join-Path $env:LOCALAPPDATA 'VaultXPay\Secrets\initial.vaultx-key.json'
 npm.cmd run staging:operator -- ensure --key-file $initial
@@ -212,7 +254,26 @@ itself always refuses `vaultx_pay_test`, development, and production database
 names. Its `.env` loading is disabled; all configuration must be explicit.
 
 Windows DPAPI invocation/error handling is covered by mocked process tests. The
-full suite and POSIX delivery run on Linux; native Windows DPAPI/ACL behavior must
-also be checked by a trusted administrator on their Windows machine before use.
+`Windows provisioning compatibility` GitHub workflow additionally runs
+`tests/windows/key-delivery.test.ts` on `windows-latest`, using real PowerShell and
+DPAPI. It checks UTF-8 encryption/decryption, the actual protected-file delivery,
+overwrite refusal, and tampered-blob rejection with deliberately invalid synthetic
+credential text. It has no database configuration and provisions no credentials.
+On Linux, these native tests are reported as skipped, not passed. Confirm the
+Windows job result on this PR before relying on it; a queued/missing/failed job is
+not evidence of Windows compatibility.
+
+A trusted administrator must still check their own Windows profile, PowerShell,
+filesystem/backup policy, and machine-specific DPAPI behavior. To run the same
+credential-free native tests from CMD after installation:
+
+```bat
+npm test -- tests/windows/key-delivery.test.ts tests/unit/windows-key-delivery.test.ts
+```
+
+Use the administrator's usual Windows user, and confirm all five selected tests
+pass. Do not use a real API key or URL for this test. Different-user/machine
+decryption is intentionally not supported by CurrentUser DPAPI. Do not use the
+Linux mock-test result as a substitute for this native check.
 No schema migrations, Render changes, real credentials, or real payments are part
 of this task.

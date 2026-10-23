@@ -55,8 +55,46 @@ describe('staging authorization and target configuration', () => {
       host: 'db.example',
       user: 'staging_user',
       database: 'vaultx_pay_staging',
-      ssl: { rejectUnauthorized: true },
+      ssl: { rejectUnauthorized: true, minVersion: 'TLSv1.2', servername: 'db.example' },
     });
+  });
+
+  it('rejects Render internal endpoints instead of disabling certificate verification', async () => {
+    const internal = {
+      ...valid,
+      DATABASE_URL: 'postgres://staging_user:synthetic@dpg-synthetic-a/vaultx_pay_staging',
+      STAGING_DATABASE_HOST: 'dpg-synthetic-a',
+    };
+    expect(() => stagingPoolConfig(internal)).toThrow('Render internal PostgreSQL endpoints');
+    let errors = '';
+    expect(
+      await runStagingCli(
+        ['status'],
+        internal,
+        () => undefined,
+        (text) => {
+          errors += text;
+        },
+      ),
+    ).toBe(1);
+    expect(errors.includes('dpg-synthetic-a')).toBe(false);
+    expect(errors.includes('synthetic@')).toBe(false);
+  });
+
+  it('preserves the external hostname for SNI and accepts only verify-full URL options', () => {
+    const host = 'dpg-synthetic-a.oregon-postgres.render.com';
+    const config = stagingPoolConfig({
+      ...valid,
+      DATABASE_URL: `postgres://staging_user:synthetic@${host}/vaultx_pay_staging?sslmode=verify-full`,
+      STAGING_DATABASE_HOST: host,
+    });
+    expect(config).toMatchObject({
+      host,
+      ssl: { servername: host, rejectUnauthorized: true, minVersion: 'TLSv1.2' },
+    });
+    expect(() =>
+      stagingPoolConfig({ ...valid, DATABASE_URL: valid.DATABASE_URL + '?sslmode=require' }),
+    ).toThrow('Staging provisioning refused (configuration).');
   });
 
   it.each(

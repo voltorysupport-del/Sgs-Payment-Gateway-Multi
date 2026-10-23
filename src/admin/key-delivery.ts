@@ -12,6 +12,7 @@ export async function encryptForWindows(plaintext: string): Promise<string> {
   // Secret input travels only over stdin; neither argv nor stdout contains it.
   return new Promise((resolve, reject) => {
     const script = `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security;
+      [Console]::InputEncoding=[Text.UTF8Encoding]::new($false);
       $bytes=[Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd());
       $sealed=[Security.Cryptography.ProtectedData]::Protect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);
       [Console]::Out.Write([Convert]::ToBase64String($sealed));`;
@@ -43,7 +44,9 @@ export async function deliverKeyFile(destination: string, key: IssuedOperatorKey
     )
       throw new Error();
     // Reject directory symlinks and require a private parent on POSIX.
-    if (path.resolve(parent) !== canonicalParent) throw new Error();
+    const comparable = (value: string) =>
+      process.platform === 'win32' ? value.toLowerCase() : value;
+    if (comparable(path.resolve(parent)) !== comparable(canonicalParent)) throw new Error();
     const stat = await lstat(parent);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error();
     if (
