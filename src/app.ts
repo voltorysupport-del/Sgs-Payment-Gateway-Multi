@@ -1,41 +1,43 @@
-/**
- * Builds the Express application. It does NOT start listening on a port;
- * server.ts does that. Keeping them separate lets tests use the app directly.
- *
- * Step 1 contains only the shared foundations: security headers, request IDs,
- * structured request logging, body size limits, a health check and a single
- * consistent error format. Payment endpoints arrive in later steps.
- */
 import { randomUUID } from 'node:crypto';
 import express, { type ErrorRequestHandler, type Express } from 'express';
 import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
+import { z } from 'zod';
+import type { Pool } from 'pg';
 import type { Config } from './config/index.js';
 import { assertRealPaymentsDisabled } from './config/safety.js';
+import { authenticateOperatorKey } from './db/operator-keys.js';
 import { sendError } from './shared/http-errors.js';
 import type { Logger } from './shared/logger.js';
 
-/** Incoming X-Request-Id values are only reused if they look harmless. */
 const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]{8,64}$/;
 
 export interface AppDependencies {
   config: Config;
   logger: Logger;
+  pool: Pool;
 }
 
-export function createApp({ config, logger }: AppDependencies): Express {
-  // Defence in depth: check the payment safety locks again before building anything.
+const paymentSchema = z
+  .object({
+    amountMinor: z.number().int().positive().max(100_000_000),
+    currency: z.string().regex(/^[A-Z]{3}$/),
+  })
+  .strict();
+
+const idempotencySchema = z
+  .string()
+  .min(8)
+  .max(128)
+  .regex(/^[A-Za-z0-9_-]+$/);
+
+export function createApp({ config, logger, pool }: AppDependencies): Express {
   assertRealPaymentsDisabled(config);
 
   const app = express();
-
-  // Don't advertise which framework we use.
   app.disable('x-powered-by');
-
-  // Standard security headers (no sniffing, no framing, strict transport, etc.).
   app.use(helmet());
 
-  // Structured request logging with a request ID on every request and response.
   app.use(
     pinoHttp({
       logger,
@@ -46,8 +48,6 @@ export function createApp({ config, logger }: AppDependencies): Express {
         res.setHeader('x-request-id', id);
         return id;
       },
-      // Log only what we need. Headers (which may contain API keys) are never logged,
-      // and query strings are stripped from URLs.
       serializers: {
         req: (req: { id?: unknown; method?: string; url?: string }) => ({
           id: req.id,
@@ -64,10 +64,8 @@ export function createApp({ config, logger }: AppDependencies): Express {
     }),
   );
 
-  // Accept JSON bodies only up to a small size, to limit abuse.
   app.use(express.json({ limit: '100kb' }));
 
-  // Health check: is the service running? (A database check is added in Step 2.)
   app.get('/health', (_req, res) => {
     res.json({
       status: 'ok',
@@ -76,12 +74,149 @@ export function createApp({ config, logger }: AppDependencies): Express {
     });
   });
 
-  // Anything else is "not found", in the standard error format.
+  app.post('/payments', async (req, res, next) => {
+    try {
+      const authorization = req.header('authorization');
+      const apiKey = authorization?.startsWith('Bearer ')
+        ? authorization.slice('Bearer '.length)
+        : '';
+
+      if (!apiKey) {
+        sendError(res, 401, 'unauthorized', 'A valid operator API key is required.');
+        return;
+      }
+
+      const operator = await authenticateOperatorKey(pool, apiKey);
+      if (!operator) {
+        sendError(res, 401, 'unauthorized', 'A valid operator API key is required.');
+        return;
+      }
+
+      const idempotencyKey = req.header('idempotency-key');
+      const parsedIdempotency = idempotencySchema.safeParse(idempotencyKey);
+      if (!parsedIdempotency.success) {
+        sendError(
+          res,
+          400,
+          'invalid_idempotency_key',
+          'A valid Idempotency-Key header is required.',
+        );
+        return;
+      }
+
+      const parsedBody = paymentSchema.safeParse(req.body);
+      if (!parsedBody.success) {
+        sendError(res, 400, 'invalid_request', 'The payment request is invalid.');
+        return;
+      }
+
+      const { amountMinor, currency } = parsedBody.data;
+      const existing = await pool.query(
+        `SELECT id, amount_minor, currency, status, provider
+         FROM payments
+         WHERE operator_id = $1 AND idempotency_key = $2`,
+        [operator.id, parsedIdempotency.data],
+      );
+
+      if (existing.rows.length > 0) {
+        const payment = existing.rows[0] as {
+          id: string;
+          amount_minor: string;
+          currency: string;
+          status: string;
+          provider: string;
+        };
+
+        if (Number(payment.amount_minor) !== amountMinor || payment.currency.trim() !== currency) {
+          sendError(
+            res,
+            409,
+            'idempotency_conflict',
+            'This idempotency key was already used with a different request.',
+          );
+          return;
+        }
+
+        res.status(200).json({
+          id: payment.id,
+          amountMinor: Number(payment.amount_minor),
+          currency: payment.currency.trim(),
+          status: payment.status,
+          provider: payment.provider,
+        });
+        return;
+      }
+
+      const paymentId = randomUUID();
+      const inserted = await pool.query(
+        `INSERT INTO payments
+           (id, operator_id, provider, amount_minor, currency, status, idempotency_key)
+         VALUES ($1, $2, 'simulator', $3, $4, 'pending', $5)
+         ON CONFLICT (operator_id, idempotency_key) DO NOTHING
+         RETURNING id, amount_minor, currency, status, provider`,
+        [paymentId, operator.id, amountMinor, currency, parsedIdempotency.data],
+      );
+
+      let paymentRow = inserted.rows[0] as
+        | {
+            id: string;
+            amount_minor: string;
+            currency: string;
+            status: string;
+            provider: string;
+          }
+        | undefined;
+
+      // A concurrent request may have inserted the same key after our initial lookup.
+      // Read the winning row and apply the same idempotency rules instead of returning
+      // a spurious conflict for an identical request.
+      if (!paymentRow) {
+        const concurrent = await pool.query(
+          `SELECT id, amount_minor, currency, status, provider
+           FROM payments
+           WHERE operator_id = $1 AND idempotency_key = $2`,
+          [operator.id, parsedIdempotency.data],
+        );
+        paymentRow = concurrent.rows[0] as typeof paymentRow;
+      }
+
+      if (!paymentRow) {
+        sendError(res, 409, 'idempotency_conflict', 'The idempotency key could not be resolved.');
+        return;
+      }
+
+      if (
+        Number(paymentRow.amount_minor) !== amountMinor ||
+        paymentRow.currency.trim() !== currency
+      ) {
+        sendError(
+          res,
+          409,
+          'idempotency_conflict',
+          'This idempotency key was already used with a different request.',
+        );
+        return;
+      }
+
+      const payment = paymentRow;
+      const wasCreated = inserted.rows.length > 0;
+
+      res.status(wasCreated ? 201 : 200).json({
+        id: payment.id,
+        amountMinor: Number(payment.amount_minor),
+        currency: payment.currency.trim(),
+        status: payment.status,
+        provider: payment.provider,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.use((_req, res) => {
     sendError(res, 404, 'not_found', 'The requested resource was not found.');
   });
 
-  // Central error handler: log the details, send the caller a safe message only.
   const errorHandler: ErrorRequestHandler = (err: unknown, req, res, _next) => {
     const type = (err as { type?: unknown } | null)?.type;
 

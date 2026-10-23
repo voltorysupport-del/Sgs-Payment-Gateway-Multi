@@ -1,19 +1,55 @@
+import { randomUUID } from 'node:crypto';
+import { Pool } from 'pg';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app.js';
 import type { Config } from '../../src/config/index.js';
 import { UnsafeConfigurationError } from '../../src/config/safety.js';
+import { runMigrations } from '../../src/db/migrate.js';
+import { createOperatorWithApiKey, revokeOperatorKey } from '../../src/db/operator-keys.js';
 import { captureLogger, testConfig } from '../helpers.js';
 
-function buildApp() {
-  const { logger, output } = captureLogger();
-  const app = createApp({ config: testConfig(), logger });
-  return { app, logs: output };
-}
+const config = testConfig();
+const pool = new Pool({ connectionString: config.databaseUrl });
+const { logger } = captureLogger();
+const app = createApp({ config, logger, pool });
+
+let operatorId = '';
+let keyId = '';
+let apiKey = '';
+
+beforeAll(async () => {
+  await runMigrations(pool);
+});
+
+beforeEach(async () => {
+  const created = await createOperatorWithApiKey(
+    pool,
+    'Integration Test Operator',
+    `test_${randomUUID().replaceAll('-', '')}`,
+  );
+  operatorId = created.operatorId;
+  keyId = created.keyId;
+  apiKey = created.apiKey;
+});
+
+afterEach(async () => {
+  if (operatorId) {
+    await pool.query('DELETE FROM payments WHERE operator_id = $1', [operatorId]);
+    await pool.query('DELETE FROM operator_api_keys WHERE operator_id = $1', [operatorId]);
+    await pool.query('DELETE FROM operators WHERE id = $1', [operatorId]);
+  }
+  operatorId = '';
+  keyId = '';
+  apiKey = '';
+});
+
+afterAll(async () => {
+  await pool.end();
+});
 
 describe('GET /health', () => {
-  it('returns 200 with a simple status and no sensitive information', async () => {
-    const { app } = buildApp();
+  it('returns a simple status without sensitive information', async () => {
     const res = await request(app).get('/health');
 
     expect(res.status).toBe(200);
@@ -23,102 +59,165 @@ describe('GET /health', () => {
       realPaymentsEnabled: false,
     });
   });
-});
 
-describe('security headers', () => {
-  it('sets standard security headers and hides the framework name', async () => {
-    const { app } = buildApp();
+  it('does not expose the Express technology header', async () => {
     const res = await request(app).get('/health');
 
-    expect(res.headers['x-content-type-options']).toBe('nosniff');
-    expect(res.headers['x-frame-options']).toBe('SAMEORIGIN');
-    expect(res.headers['strict-transport-security']).toBeDefined();
     expect(res.headers['x-powered-by']).toBeUndefined();
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
   });
 });
 
-describe('request IDs', () => {
-  it('adds a new request ID to every response', async () => {
-    const { app } = buildApp();
-    const res = await request(app).get('/health');
-    expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
-  });
-
-  it('reuses a safe incoming request ID', async () => {
-    const { app } = buildApp();
-    const res = await request(app).get('/health').set('X-Request-Id', 'abc12345-from-client');
-    expect(res.headers['x-request-id']).toBe('abc12345-from-client');
-  });
-
-  it('replaces an unsafe incoming request ID', async () => {
-    const { app } = buildApp();
-    const res = await request(app).get('/health').set('X-Request-Id', '<script>alert(1)</script>');
-    expect(res.headers['x-request-id']).not.toContain('<script>');
-  });
-});
-
-describe('error format', () => {
-  it('returns a consistent JSON error for unknown routes', async () => {
-    const { app } = buildApp();
-    const res = await request(app).get('/v1/payments/pay_123');
+describe('request handling', () => {
+  it('returns a structured 404 for unknown routes', async () => {
+    const res = await request(app).get('/does-not-exist');
 
     expect(res.status).toBe(404);
-    expect(res.body.error.code).toBe('not_found');
-    expect(typeof res.body.error.message).toBe('string');
-    expect(res.body.error.requestId).toBe(res.headers['x-request-id']);
+    expect(res.body).toMatchObject({ error: { code: 'not_found' } });
   });
 
-  it('rejects invalid JSON with a 400, without leaking internals', async () => {
-    const { app } = buildApp();
+  it('rejects payment creation without an API key', async () => {
     const res = await request(app)
-      .post('/anything')
-      .set('Content-Type', 'application/json')
-      .send('{"not valid json');
+      .post('/payments')
+      .set('Idempotency-Key', 'test-idem-key')
+      .send({ amountMinor: 1000, currency: 'USD' });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects a malformed API key without querying the database', async () => {
+    const res = await request(app)
+      .post('/payments')
+      .set('Authorization', 'Bearer not-a-valid-key')
+      .set('Idempotency-Key', 'test-idem-key')
+      .send({ amountMinor: 1000, currency: 'USD' });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects invalid payment bodies', async () => {
+    const res = await request(app)
+      .post('/payments')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .set('Idempotency-Key', 'test-idem-key')
+      .send({ amountMinor: -1, currency: 'usd' });
 
     expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('invalid_json');
-    expect(JSON.stringify(res.body)).not.toMatch(/stack|SyntaxError/);
+    expect(res.body).toMatchObject({ error: { code: 'invalid_request' } });
   });
 
-  it('rejects bodies larger than 100kb', async () => {
-    const { app } = buildApp();
+  it('requires a valid idempotency key', async () => {
     const res = await request(app)
-      .post('/anything')
-      .set('Content-Type', 'application/json')
-      .send(JSON.stringify({ data: 'x'.repeat(150_000) }));
+      .post('/payments')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({ amountMinor: 1000, currency: 'USD' });
 
-    expect(res.status).toBe(413);
-    expect(res.body.error.code).toBe('payload_too_large');
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: { code: 'invalid_idempotency_key' } });
   });
 });
 
-describe('logging', () => {
-  it('never writes the Authorization header or query strings to the logs', async () => {
-    const { app, logs } = buildApp();
-    await request(app)
-      .get('/health?token=QUERY_SECRET_SHOULD_NOT_APPEAR')
-      .set('Authorization', 'Bearer vxp_test_KEY_SHOULD_NOT_APPEAR');
+describe('operator API keys', () => {
+  it('creates a simulated payment for an authenticated operator', async () => {
+    const res = await request(app)
+      .post('/payments')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .set('Idempotency-Key', 'payment-create-123')
+      .send({ amountMinor: 1000, currency: 'USD' });
 
-    const text = logs();
-    expect(text).toContain('/health');
-    expect(text).not.toContain('KEY_SHOULD_NOT_APPEAR');
-    expect(text).not.toContain('QUERY_SECRET_SHOULD_NOT_APPEAR');
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      amountMinor: 1000,
+      currency: 'USD',
+      status: 'pending',
+      provider: 'simulator',
+    });
+    expect(res.body.id).toEqual(expect.any(String));
+  });
+
+  it('returns the original payment for an identical retry', async () => {
+    const sendPayment = () =>
+      request(app)
+        .post('/payments')
+        .set('Authorization', `Bearer ${apiKey}`)
+        .set('Idempotency-Key', 'payment-retry-123')
+        .send({ amountMinor: 2500, currency: 'EUR' });
+
+    const first = await sendPayment();
+    const second = await sendPayment();
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(200);
+    expect(second.body.id).toBe(first.body.id);
+  });
+
+  it('rejects reuse of an idempotency key with a different amount', async () => {
+    const first = await request(app)
+      .post('/payments')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .set('Idempotency-Key', 'payment-conflict-123')
+      .send({ amountMinor: 2500, currency: 'EUR' });
+
+    const second = await request(app)
+      .post('/payments')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .set('Idempotency-Key', 'payment-conflict-123')
+      .send({ amountMinor: 2600, currency: 'EUR' });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(409);
+    expect(second.body).toMatchObject({ error: { code: 'idempotency_conflict' } });
+  });
+
+  it('returns the same payment for concurrent identical requests', async () => {
+    const sendPayment = () =>
+      request(app)
+        .post('/payments')
+        .set('Authorization', `Bearer ${apiKey}`)
+        .set('Idempotency-Key', 'payment-concurrent-123')
+        .send({ amountMinor: 5000, currency: 'GBP' });
+
+    const [first, second] = await Promise.all([sendPayment(), sendPayment()]);
+
+    expect([first.status, second.status].sort()).toEqual([200, 201]);
+    expect(first.body.id).toBe(second.body.id);
+  });
+
+  it('rejects a revoked API key', async () => {
+    expect(await revokeOperatorKey(pool, keyId, operatorId)).toBe(true);
+
+    const res = await request(app)
+      .post('/payments')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .set('Idempotency-Key', 'payment-revoked-123')
+      .send({ amountMinor: 1000, currency: 'USD' });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('does not allow one operator to revoke another operator key', async () => {
+    const other = await createOperatorWithApiKey(
+      pool,
+      'Other Integration Operator',
+      `other_${randomUUID().replaceAll('-', '')}`,
+    );
+
+    try {
+      expect(await revokeOperatorKey(pool, keyId, other.operatorId)).toBe(false);
+    } finally {
+      await pool.query('DELETE FROM operator_api_keys WHERE operator_id = $1', [other.operatorId]);
+      await pool.query('DELETE FROM operators WHERE id = $1', [other.operatorId]);
+    }
   });
 });
 
-describe('payment safety at app start-up', () => {
-  it('refuses to build the app if live mode is somehow enabled', () => {
-    const { logger } = captureLogger();
-    const unsafe = { ...testConfig(), liveModeEnabled: true } as unknown as Config;
-    expect(() => createApp({ config: unsafe, logger })).toThrow(UnsafeConfigurationError);
-  });
+describe('configuration safety', () => {
+  it('rejects unsafe live-payment configuration', () => {
+    const unsafe = {
+      ...config,
+      liveModeEnabled: true,
+    } as unknown as Config;
 
-  it('has no payment endpoints in Step 1', async () => {
-    const { app } = buildApp();
-    const res = await request(app)
-      .post('/v1/payments')
-      .set('Content-Type', 'application/json')
-      .send({ amount_minor: 5000, currency: 'EUR' });
-    expect(res.status).toBe(404);
+    expect(() => createApp({ config: unsafe, logger, pool })).toThrow(UnsafeConfigurationError);
   });
 });

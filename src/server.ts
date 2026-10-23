@@ -1,12 +1,14 @@
 /**
- * Entry point: loads settings, builds the app and starts the HTTP server.
+ * Entry point: loads settings, connects to PostgreSQL, applies migrations,
+ * and starts the HTTP server.
  *
- * If configuration is missing or unsafe, it prints what is wrong (never the
- * secret values) and exits with an error instead of starting.
+ * Real payment processing remains disabled.
  */
 import { existsSync } from 'node:fs';
 import { createApp } from './app.js';
 import { ConfigError, loadConfig, type Config } from './config/index.js';
+import { checkDatabase, createPool } from './db/pool.js';
+import { runMigrations } from './db/migrate.js';
 import { createLogger } from './shared/logger.js';
 
 // Load a local .env file if one exists (local development only).
@@ -15,8 +17,9 @@ if (process.env.NODE_ENV !== 'test' && existsSync('.env')) {
   process.loadEnvFile('.env');
 }
 
-function start(): void {
+async function start(): Promise<void> {
   let config: Config;
+
   try {
     config = loadConfig(process.env);
   } catch (error) {
@@ -34,7 +37,19 @@ function start(): void {
     pretty: config.nodeEnv === 'development' && process.stdout.isTTY,
   });
 
-  const app = createApp({ config, logger });
+  const pool = createPool(config);
+
+  try {
+    await checkDatabase(pool);
+    await runMigrations(pool);
+  } catch (error) {
+    logger.error({ err: error }, 'Database initialization failed');
+    await pool.end();
+    process.exitCode = 1;
+    return;
+  }
+
+  const app = createApp({ config, logger, pool });
 
   const server = app.listen(config.port, () => {
     logger.info(
@@ -49,14 +64,45 @@ function start(): void {
     );
   });
 
-  // Finish in-flight requests before exiting when asked to stop.
-  const shutdown = (signal: string) => {
+  let shuttingDown = false;
+
+  const shutdown = (signal: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
     logger.info({ signal }, 'Shutting down');
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(1), 10_000).unref();
+
+    const forceExit = setTimeout(() => {
+      logger.error('Shutdown timed out');
+      process.exit(1);
+    }, 10_000);
+    forceExit.unref();
+
+    server.close((error) => {
+      if (error) {
+        logger.error({ err: error }, 'HTTP server shutdown failed');
+        process.exitCode = 1;
+      }
+
+      void pool
+        .end()
+        .then(() => {
+          clearTimeout(forceExit);
+          process.exit();
+        })
+        .catch((poolError: unknown) => {
+          logger.error({ err: poolError }, 'Database pool shutdown failed');
+          process.exit(1);
+        });
+    });
   };
+
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-start();
+start().catch((error: unknown) => {
+  // eslint-disable-next-line no-console
+  console.error('VaultX Pay failed to start.', error);
+  process.exitCode = 1;
+});
