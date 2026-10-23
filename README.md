@@ -2,12 +2,16 @@
 
 A multi-operator payment gateway, designed initially for the iGaming industry.
 
-> **Status: Version 1, Step 1 (project setup).**
-> There are no payment endpoints yet. **Real payment processing is disabled** and the app
-> refuses to start if anyone tries to enable it.
+> **Status: Version 1, simulator-only payment lifecycle.**
+> Authenticated operators can create, retrieve, and simulate successful or failed payments.
+> **Real payment processing is disabled** and the app refuses to start if anyone tries to enable it.
 >
 > Feature branch: `feature/step-1-project-setup`. See `docs/step-1-review-notes.md` for
 > what has and has not been verified.
+
+See [Payment API](docs/payments.md) for the lifecycle, authorization, and retry behavior.
+The original Step 1 review notes are historical; current verification commands are in
+[Safe automated testing](docs/testing.md).
 
 ## Safety rules (always true in Version 1)
 
@@ -39,8 +43,9 @@ cp .env.example .env
 # 3. Start the local database (Docker Desktop must be running)
 npm run db:up
 
-# 4. Run every check
-npm run check
+# 4. Run every check with a separate disposable PostgreSQL container
+#    (does not use .env or the development database)
+npm run test:isolated -- --check
 
 # 5. Start the app in development mode
 npm run dev
@@ -54,23 +59,30 @@ Then open http://localhost:3000/health. You should see:
 
 ## Useful commands
 
-| Command                                 | What it does                                                    |
-| --------------------------------------- | --------------------------------------------------------------- |
-| `npm run dev`                           | Start the app and restart it automatically when you save a file |
-| `npm run check`                         | Type check, lint, formatting check and tests, all in one        |
-| `npm test`                              | Run the automated tests                                         |
-| `npm run typecheck`                     | Check TypeScript types                                          |
-| `npm run lint`                          | Look for likely bugs and unsafe patterns                        |
-| `npm run format`                        | Auto-format all files                                           |
-| `npm run build` / `npm start`           | Compile to `dist/` and run the compiled app                     |
-| `npm run secrets:scan`                  | Scan the whole Git history for secrets                          |
-| `npm run db:up` / `db:down` / `db:logs` | Start, stop, or watch the local database                        |
+See [Safe automated testing](docs/testing.md) for database safeguards, CI configuration,
+and exact reproduction commands. Plain `npm test` requires an explicitly provisioned
+test database; it never falls back to the application's `DATABASE_URL`.
+
+| Command                                 | What it does                                                              |
+| --------------------------------------- | ------------------------------------------------------------------------- |
+| `npm run dev`                           | Start the app and restart it automatically when you save a file           |
+| `npm run check`                         | Type check, lint, formatting check and tests, all in one                  |
+| `npm test`                              | Run the automated tests                                                   |
+| `npm run test:isolated -- --check`      | Provision disposable PostgreSQL, run all checks and build, then remove it |
+| `npm run typecheck`                     | Check TypeScript types                                                    |
+| `npm run lint`                          | Look for likely bugs and unsafe patterns                                  |
+| `npm run format`                        | Auto-format all files                                                     |
+| `npm run build` / `npm start`           | Compile to `dist/` and run the compiled app                               |
+| `npm run secrets:scan`                  | Scan the whole Git history for secrets                                    |
+| `npm run db:up` / `db:down` / `db:logs` | Start, stop, or watch the local database                                  |
 
 ## Project layout
 
 ```
 src/
   app.ts              builds the Express app (security headers, request IDs, logging, errors)
+  payments/routes.ts  authenticated creation, retrieval, and simulation routes
+  db/payments.ts      PostgreSQL persistence, idempotency, and locked state transitions
   server.ts           loads settings and starts the server
   config/index.ts     reads and validates every setting; refuses unsafe ones
   config/safety.ts    second, independent "real payments are off" check

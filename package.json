@@ -17,6 +17,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "test:isolated": "node scripts/test-isolated.mjs",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm run test",
     "secrets:scan": "gitleaks git --redact --verbose .",

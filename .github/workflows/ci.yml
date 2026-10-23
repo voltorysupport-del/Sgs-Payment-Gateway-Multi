@@ -22,6 +22,22 @@ jobs:
     name: Type check, lint, format, test, build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: vaultx_test_admin
+          POSTGRES_DB: vaultx_pay_test
+          # Disposable service only; the runner generates the restricted role's password.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - '127.0.0.1::5432'
+        options: >-
+          --tmpfs /var/lib/postgresql/data:rw
+          --health-cmd "pg_isready -h 127.0.0.1 -U vaultx_test_admin -d vaultx_pay_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # Belt and braces: CI can never run with real payments enabled.
       LIVE_MODE_ENABLED: 'false'
@@ -52,7 +68,9 @@ jobs:
         run: npm run format:check
 
       - name: Run tests
-        run: npm test
+        env:
+          VAULTX_CI_POSTGRES_ID: ${{ job.services.postgres.id }}
+        run: npm run test:isolated -- --ci-service
 
       - name: Build
         run: npm run build
