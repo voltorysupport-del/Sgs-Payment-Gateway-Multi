@@ -147,6 +147,24 @@ try {
     COMMIT;
   `,
   );
+  // Separate staging-named database for testing the staging-only CLI. It exists
+  // only inside this new disposable cluster, never in Render or a developer DB.
+  docker(
+    [
+      'exec',
+      '--interactive',
+      '--user',
+      'postgres',
+      container,
+      'psql',
+      '-X',
+      '--username=vaultx_test_admin',
+      '--dbname=vaultx_pay_test',
+      '--set=ON_ERROR_STOP=1',
+    ],
+    `CREATE DATABASE vaultx_pay_staging OWNER vaultx_test;
+      COMMENT ON DATABASE vaultx_pay_staging IS 'vaultx-pay:staging';`,
+  );
   // Trust was used only to bootstrap this fresh container. TCP test connections
   // must now authenticate; Unix-socket access remains local to the container.
   docker([
@@ -210,8 +228,25 @@ try {
   if (remaining !== '2|0|0|0') {
     throw new Error('Expected two migrations and no remaining integration fixtures.');
   }
+  const stagingRemaining = docker([
+    'exec',
+    '--user',
+    'postgres',
+    container,
+    'psql',
+    '-X',
+    '--quiet',
+    '--tuples-only',
+    '--no-align',
+    '--username=vaultx_test',
+    '--dbname=vaultx_pay_staging',
+    '--set=ON_ERROR_STOP=1',
+    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments); ROLLBACK;',
+  ]);
+  if (stagingRemaining !== '2|0|0|0')
+    throw new Error('Staging CLI test fixtures were not cleaned up.');
   process.stdout.write(
-    'Confirmed: 2 migrations applied; 0 operators, API keys, or payments remain.\n',
+    'Confirmed in both disposable databases: 2 migrations applied; 0 operators, API keys, or payments remain.\n',
   );
   if (check) await npm('build');
 } catch (error) {
