@@ -5,7 +5,8 @@ import { createLogger, type Logger } from '../src/shared/logger.js';
 /** A minimal, valid set of settings for tests. No real secrets. */
 export const VALID_ENV: Readonly<Record<string, string>> = Object.freeze({
   NODE_ENV: 'test',
-  DATABASE_URL: 'postgres://vaultx:test-only-password@localhost:5432/vaultx_pay_test',
+  // Configuration-only fixture: never used to open a connection.
+  DATABASE_URL: 'postgres://config-only.invalid/config_only',
 });
 
 export function testConfig(overrides: Record<string, string> = {}): Config {

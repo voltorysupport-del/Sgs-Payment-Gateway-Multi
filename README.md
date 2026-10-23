@@ -39,8 +39,9 @@ cp .env.example .env
 # 3. Start the local database (Docker Desktop must be running)
 npm run db:up
 
-# 4. Run every check
-npm run check
+# 4. Run every check with a separate disposable PostgreSQL container
+#    (does not use .env or the development database)
+npm run test:isolated -- --check
 
 # 5. Start the app in development mode
 npm run dev
@@ -54,17 +55,22 @@ Then open http://localhost:3000/health. You should see:
 
 ## Useful commands
 
-| Command                                 | What it does                                                    |
-| --------------------------------------- | --------------------------------------------------------------- |
-| `npm run dev`                           | Start the app and restart it automatically when you save a file |
-| `npm run check`                         | Type check, lint, formatting check and tests, all in one        |
-| `npm test`                              | Run the automated tests                                         |
-| `npm run typecheck`                     | Check TypeScript types                                          |
-| `npm run lint`                          | Look for likely bugs and unsafe patterns                        |
-| `npm run format`                        | Auto-format all files                                           |
-| `npm run build` / `npm start`           | Compile to `dist/` and run the compiled app                     |
-| `npm run secrets:scan`                  | Scan the whole Git history for secrets                          |
-| `npm run db:up` / `db:down` / `db:logs` | Start, stop, or watch the local database                        |
+See [Safe automated testing](docs/testing.md) for database safeguards, CI configuration,
+and exact reproduction commands. Plain `npm test` requires an explicitly provisioned
+test database; it never falls back to the application's `DATABASE_URL`.
+
+| Command                                 | What it does                                                              |
+| --------------------------------------- | ------------------------------------------------------------------------- |
+| `npm run dev`                           | Start the app and restart it automatically when you save a file           |
+| `npm run check`                         | Type check, lint, formatting check and tests, all in one                  |
+| `npm test`                              | Run the automated tests                                                   |
+| `npm run test:isolated -- --check`      | Provision disposable PostgreSQL, run all checks and build, then remove it |
+| `npm run typecheck`                     | Check TypeScript types                                                    |
+| `npm run lint`                          | Look for likely bugs and unsafe patterns                                  |
+| `npm run format`                        | Auto-format all files                                                     |
+| `npm run build` / `npm start`           | Compile to `dist/` and run the compiled app                               |
+| `npm run secrets:scan`                  | Scan the whole Git history for secrets                                    |
+| `npm run db:up` / `db:down` / `db:logs` | Start, stop, or watch the local database                                  |
 
 ## Project layout
 

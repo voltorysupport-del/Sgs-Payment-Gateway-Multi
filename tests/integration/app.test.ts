@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { Pool } from 'pg';
+import type { Pool } from 'pg';
+import type { Express } from 'express';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app.js';
@@ -8,18 +9,22 @@ import { UnsafeConfigurationError } from '../../src/config/safety.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { createOperatorWithApiKey, revokeOperatorKey } from '../../src/db/operator-keys.js';
 import { captureLogger, testConfig } from '../helpers.js';
+import { openTestDatabase } from '../test-database.js';
 
 const config = testConfig();
-const pool = new Pool({ connectionString: config.databaseUrl });
 const { logger } = captureLogger();
-const app = createApp({ config, logger, pool });
+let pool: Pool;
+let app: Express;
 
 let operatorId = '';
 let keyId = '';
 let apiKey = '';
 
 beforeAll(async () => {
+  // No migrations, fixtures, requests, or cleanup can run before verification.
+  pool = await openTestDatabase();
   await runMigrations(pool);
+  app = createApp({ config, logger, pool });
 });
 
 beforeEach(async () => {
@@ -45,7 +50,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await pool.end();
+  await pool?.end();
 });
 
 describe('GET /health', () => {
