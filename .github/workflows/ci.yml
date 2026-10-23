@@ -28,7 +28,7 @@ jobs:
       ALLOWED_PROVIDERS: simulator
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js (version from .nvmrc)
         uses: actions/setup-node@v4
@@ -65,7 +65,7 @@ jobs:
       GITLEAKS_VERSION: 8.28.0
     steps:
       - name: Check out full history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
