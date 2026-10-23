@@ -2,12 +2,16 @@
 
 A multi-operator payment gateway, designed initially for the iGaming industry.
 
-> **Status: Version 1, Step 1 (project setup).**
-> There are no payment endpoints yet. **Real payment processing is disabled** and the app
-> refuses to start if anyone tries to enable it.
+> **Status: Version 1, simulator-only payment lifecycle.**
+> Authenticated operators can create, retrieve, and simulate successful or failed payments.
+> **Real payment processing is disabled** and the app refuses to start if anyone tries to enable it.
 >
 > Feature branch: `feature/step-1-project-setup`. See `docs/step-1-review-notes.md` for
 > what has and has not been verified.
+
+See [Payment API](docs/payments.md) for the lifecycle, authorization, and retry behavior.
+The original Step 1 review notes are historical; current verification commands are in
+[Safe automated testing](docs/testing.md).
 
 ## Safety rules (always true in Version 1)
 
@@ -77,6 +81,8 @@ test database; it never falls back to the application's `DATABASE_URL`.
 ```
 src/
   app.ts              builds the Express app (security headers, request IDs, logging, errors)
+  payments/routes.ts  authenticated creation, retrieval, and simulation routes
+  db/payments.ts      PostgreSQL persistence, idempotency, and locked state transitions
   server.ts           loads settings and starts the server
   config/index.ts     reads and validates every setting; refuses unsafe ones
   config/safety.ts    second, independent "real payments are off" check
