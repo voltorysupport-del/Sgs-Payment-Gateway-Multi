@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import type { Pool } from 'pg';
 import type { Express } from 'express';
 import request from 'supertest';
@@ -471,4 +472,58 @@ describe('simulated payment lifecycle', () => {
     expect(completed.body.status).toBe('succeeded');
     expect((await request(productionApp).get('/health')).body.realPaymentsEnabled).toBe(false);
   });
+});
+
+// Exercise the exact distributed client controller against the real gateway and
+// independently verified disposable PostgreSQL, reusing this suite's fixture key.
+it('runs the Windows smoke-test controller through the persisted simulator lifecycle', async () => {
+  const { run } = createRequire(import.meta.url)('../../tools/simulated-payment-test/flow.js') as {
+    run(
+      this: void,
+      options: {
+        request(
+          method: 'GET' | 'POST',
+          route: string,
+          body: Record<string, unknown> | undefined,
+          settings: { auth?: boolean; idempotencyKey?: string },
+        ): Promise<{ status: number; body: unknown }>;
+        confirm(): Promise<string>;
+        begin(record: Record<string, unknown>): Promise<void>;
+        record(record: Record<string, unknown>): Promise<void>;
+      },
+    ): Promise<{ result: string; paymentId: string }>;
+  };
+  const records: Record<string, unknown>[] = [];
+  const result = await run({
+    request: async (method, route, body, settings) => {
+      const operation = method === 'GET' ? request(app).get(route) : request(app).post(route);
+      if (settings.auth !== false) operation.set('Authorization', `Bearer ${apiKey}`);
+      if (settings.idempotencyKey) operation.set('Idempotency-Key', settings.idempotencyKey);
+      if (body) operation.send(body);
+      const response = await operation;
+      return { status: response.status, body: response.body };
+    },
+    confirm: () => Promise.resolve('RUN ONE SIMULATED PAYMENT'),
+    begin: (value) => {
+      records.push(value);
+      return Promise.resolve();
+    },
+    record: (value) => {
+      records.push(value);
+      return Promise.resolve();
+    },
+  });
+  expect(result.result).toBe('SIMULATED_PAYMENT_VERIFIED');
+  const persisted = await pool.query(
+    'SELECT id,status,provider,amount_minor FROM payments WHERE operator_id=$1',
+    [operatorId],
+  );
+  expect(persisted.rowCount).toBe(1);
+  expect(persisted.rows[0]).toMatchObject({
+    id: result.paymentId,
+    status: 'succeeded',
+    provider: 'simulator',
+    amount_minor: '100',
+  });
+  expect(JSON.stringify(records).includes(apiKey)).toBe(false);
 });

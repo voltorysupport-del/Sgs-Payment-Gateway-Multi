@@ -1,0 +1,45 @@
+name: Simulated payment client credential-free package validation
+on:
+  pull_request:
+    branches: ['feature/step-1-project-setup']
+    paths:
+      - 'tools/simulated-payment-test/**'
+      - '.github/workflows/simulated-payment-test-package.yml'
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ''
+      LIVE_MODE_ENABLED: 'false'
+      ALLOWED_PROVIDERS: simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build client-only package
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP 'VaultX Simulated Payment & Offline'
+          "SIMULATED_PACKAGE=$package" >> $env:GITHUB_ENV
+          node tools/simulated-payment-test/build-package.js "$package"
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Synthetic API/TLS/privacy/DPAPI validation; no staging
+        run: node tools/simulated-payment-test/validate-package.js "$env:SIMULATED_PACKAGE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VaultX-First-SIMULATED-Payment-Test
+          path: '${{ env.SIMULATED_PACKAGE }}/'
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/download-artifact@v4
+        with:
+          name: VaultX-First-SIMULATED-Payment-Test
+          path: '${{ runner.temp }}/VaultX Simulated Downloaded & Verified'
+      - name: Verify downloaded ZIP
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP 'VaultX Simulated Downloaded & Verified'
+          node tools/simulated-payment-test/validate-package.js "$download"
+          if ($LASTEXITCODE -ne 0) { throw 'Downloaded validation failed' }
