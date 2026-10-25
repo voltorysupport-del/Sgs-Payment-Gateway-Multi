@@ -57,7 +57,7 @@ rules still requires an approved administrator check later.
    once, using their existing trusted PostgreSQL administration connection:
 
    ```sql
-   SELECT current_database(), current_user;
+   SELECT current_database(), session_user, current_user;
    -- Continue ONLY if this is the intended staging database.
    COMMENT ON DATABASE vaultx_pay_staging IS 'vaultx-pay:staging';
    ```
@@ -277,3 +277,19 @@ decryption is intentionally not supported by CurrentUser DPAPI. Do not use the
 Linux mock-test result as a substitute for this native check.
 No schema migrations, Render changes, real credentials, or real payments are part
 of this task.
+
+### Automated compatibility checks
+
+The CLI verifies `session_user` against `STAGING_DATABASE_USER`: this is the
+PostgreSQL login authenticated by the connection. `current_user` can change after
+`SET ROLE` and must not substitute for the authenticated login. A role switch does
+not bypass the database-name or comment-marker checks, and SQL privileges still
+apply. Integration tests exercise both identities in disposable PostgreSQL only.
+
+Run `npm run test:isolated -- --check` from Windows CMD with Docker Desktop using
+Linux containers. The runner pins Docker to the local Windows named pipe (Unix
+socket on Linux), ignores remote Docker selectors, and invokes npm through Node
+without a command shell. Test key files remain DPAPI encrypted on Windows; only
+the test helper decrypts them in memory under the same Windows user. No production
+key-delivery behavior changes. The native Windows CI job also exercises the
+loopback-only parser fixture; a fixture crash remains a test failure.
