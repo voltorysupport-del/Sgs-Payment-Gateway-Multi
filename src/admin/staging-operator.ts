@@ -17,9 +17,10 @@ export interface KeyMetadata {
 }
 
 export async function verifyStagingTarget(client: PoolClient, expectedUser: string): Promise<void> {
+  // session_user identifies the authenticated login; SET ROLE changes current_user.
   await client.query('BEGIN READ ONLY');
   const result = await client.query<{ safe: boolean }>(
-    `SELECT current_database() = 'vaultx_pay_staging' AND current_user = $1
+    `SELECT current_database() = 'vaultx_pay_staging' AND session_user = $1
        AND pg_catalog.shobj_description(d.oid, 'pg_database') = 'vaultx-pay:staging' AS safe
      FROM pg_catalog.pg_database d WHERE d.datname = current_database()`,
     [expectedUser],

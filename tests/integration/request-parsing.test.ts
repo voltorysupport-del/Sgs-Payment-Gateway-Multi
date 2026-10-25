@@ -1,6 +1,7 @@
 import { fork, type ChildProcess } from 'node:child_process';
 import { Agent, request } from 'node:http';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { brotliCompressSync, deflateSync, gzipSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -12,7 +13,8 @@ describe('request parsing security regression (GHSA-27r3-jxmh-p828)', () => {
   let diagnostics = '';
   beforeAll(async () => {
     child = fork(fileURLToPath(new URL('../fixtures/parser-server.ts', import.meta.url)), [], {
-      execArgv: ['--import', 'tsx'],
+      // Resolve to a file URL so Windows drive letters and spaces are safe.
+      execArgv: ['--import', pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href],
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: {
         ...process.env,
@@ -29,7 +31,17 @@ describe('request parsing security regression (GHSA-27r3-jxmh-p828)', () => {
       diagnostics += chunk.toString();
     });
     port = await new Promise<number>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Parser fixture startup timed out.')), 8000);
+      const failure = (reason: string) => {
+        // Report useful loader/runtime codes without dumping inherited env or
+        // arbitrary child output. Never turn a crashed fixture into a skipped test.
+        const codes = [
+          ...new Set(diagnostics.match(/\b(?:ERR_[A-Z_]+|MODULE_NOT_FOUND)\b/g) ?? []),
+        ];
+        return new Error(
+          `Parser fixture ${reason}; exit=${child.exitCode}, signal=${child.signalCode}, codes=${codes.join(',') || 'none'}.`,
+        );
+      };
+      const timer = setTimeout(() => reject(failure('startup timed out')), 25_000);
       child.once('message', (message: unknown) => {
         clearTimeout(timer);
         const candidate = (message as { port?: unknown }).port;
@@ -38,14 +50,14 @@ describe('request parsing security regression (GHSA-27r3-jxmh-p828)', () => {
       });
       child.once('error', () => {
         clearTimeout(timer);
-        reject(new Error('Parser fixture failed.'));
+        reject(failure('failed to launch'));
       });
-      child.once('exit', () => {
+      child.once('close', () => {
         clearTimeout(timer);
-        reject(new Error('Parser fixture exited during startup.'));
+        reject(failure('exited during startup'));
       });
     });
-  }, 10_000);
+  }, 30_000);
   afterAll(async () => {
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
     await new Promise<void>((resolve) => {
@@ -57,7 +69,8 @@ describe('request parsing security regression (GHSA-27r3-jxmh-p828)', () => {
         clearTimeout(timer);
         resolve();
       });
-      child.send('stop');
+      if (child.connected) child.send('stop', () => {});
+      else child.kill();
     });
   });
 
@@ -123,7 +136,7 @@ describe('request parsing security regression (GHSA-27r3-jxmh-p828)', () => {
   async function assertAlive() {
     // Let late decoder errors surface before checking process and HTTP health.
     await new Promise((resolve) => setTimeout(resolve, 250));
-    expect(child.exitCode).toBeNull();
+    expect(child.exitCode, 'Parser fixture must survive every request').toBeNull();
     expect(child.signalCode).toBeNull();
     const response = await fetch(`http://127.0.0.1:${port}/health`, {
       signal: AbortSignal.timeout(3000),

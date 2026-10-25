@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -18,6 +18,7 @@ import { runMigrations } from '../../src/db/migrate.js';
 import { createApp } from '../../src/app.js';
 import { captureLogger, testConfig } from '../helpers.js';
 import { openTestDatabase, testDatabaseSettings } from '../test-database.js';
+import { readIssuedKey } from '../support/issued-key.js';
 
 let pool: Pool;
 let code: string;
@@ -54,7 +55,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   code = `staging-${randomUUID()}`;
-  directory = await mkdtemp(path.join(tmpdir(), 'vaultx-provisioning-'));
+  directory = await realpath(await mkdtemp(path.join(tmpdir(), 'vaultx-provisioning-')));
 });
 afterEach(async () => {
   if (code) {
@@ -93,12 +94,14 @@ async function issue() {
   const destination = path.join(directory, 'initial.vaultx-key.json');
   const result = await cli('ensure', ['--key-file', destination]);
   expect(result.status).toBe(0);
-  const key = JSON.parse(await readFile(destination, 'utf8')) as IssuedOperatorKey;
+  const key = await readIssuedKey(destination);
   expect(result.output.includes(key.apiKey)).toBe(false);
   return key;
 }
 
-describe('staging provisioning on disposable PostgreSQL only', () => {
+// Native Windows key delivery starts PowerShell; keep every assertion and allow
+// bounded startup overhead for tests performing several deliveries.
+describe('staging provisioning on disposable PostgreSQL only', { timeout: 30_000 }, () => {
   it('runs the actual CLI entry point without exposing credentials on stdout/stderr', async () => {
     const destination = path.join(directory, 'entrypoint.vaultx-key.json');
     const result = await new Promise<{ status: number; output: string }>((resolve, reject) => {
@@ -127,7 +130,7 @@ describe('staging provisioning on disposable PostgreSQL only', () => {
       child.once('exit', (status) => resolve({ status: status ?? 1, output }));
     });
     expect(result.status).toBe(0);
-    const saved = JSON.parse(await readFile(destination, 'utf8')) as IssuedOperatorKey;
+    const saved = await readIssuedKey(destination);
     expect(result.output.includes(saved.apiKey)).toBe(false);
     expect(result.output.includes(env.DATABASE_URL!)).toBe(false);
     expect((await authenticateOperatorKey(pool, saved.apiKey))?.id).toBe(saved.operatorId);
@@ -144,6 +147,29 @@ describe('staging provisioning on disposable PostgreSQL only', () => {
       ).rejects.toThrow('Staging provisioning refused (target).');
     } finally {
       await testPool.end();
+    }
+  });
+
+  it('verifies the authenticated session identity across SET ROLE, not an impersonated current role', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('SET ROLE vaultx_test_switched');
+      const identity = await client.query<{ session_user: string; current_user: string }>(
+        'SELECT session_user, current_user',
+      );
+      expect(identity.rows[0]).toEqual({
+        session_user: env.STAGING_DATABASE_USER,
+        current_user: 'vaultx_test_switched',
+      });
+      await expect(
+        verifyStagingTarget(client, env.STAGING_DATABASE_USER!),
+      ).resolves.toBeUndefined();
+      await expect(verifyStagingTarget(client, 'vaultx_test_switched')).rejects.toThrow(
+        'Staging provisioning refused (target).',
+      );
+    } finally {
+      await client.query('RESET ROLE');
+      client.release();
     }
   });
 
@@ -194,17 +220,19 @@ describe('staging provisioning on disposable PostgreSQL only', () => {
     const destination = path.join(directory, 'rotation.vaultx-key.json');
     const rotated = await cli('rotate', ['--key-id', old.keyId, '--key-file', destination]);
     expect(rotated.status).toBe(0);
-    const fresh = JSON.parse(await readFile(destination, 'utf8')) as IssuedOperatorKey;
+    const fresh = await readIssuedKey(destination);
     expect(fresh.apiKey === old.apiKey).toBe(false);
     expect(await authenticateOperatorKey(pool, old.apiKey)).toBeNull();
     expect(await authenticateOperatorKey(pool, fresh.apiKey)).toEqual({ id: old.operatorId, code });
+    const originalFile = await readFile(destination, 'utf8');
     const retry = await cli('rotate', ['--key-id', old.keyId, '--key-file', destination]);
     expect(retry.status).toBe(0);
     const metadata = JSON.parse(retry.output) as { action: string; keyId: string; keys: unknown[] };
     expect(metadata.action).toBe('unchanged');
     expect(metadata.keyId).toBe(fresh.keyId);
     expect(metadata.keys).toHaveLength(2);
-    expect((await readFile(destination, 'utf8')).includes(fresh.apiKey)).toBe(true);
+    expect((await readFile(destination, 'utf8')) === originalFile).toBe(true);
+    expect((await readIssuedKey(destination)).apiKey === fresh.apiKey).toBe(true);
   });
 
   it('rolls back old-key revocation when rotation delivery fails', async () => {

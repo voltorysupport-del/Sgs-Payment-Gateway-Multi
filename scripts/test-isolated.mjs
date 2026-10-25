@@ -1,6 +1,8 @@
 /* global process, setTimeout */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 
 // Always use the local daemon, never an inherited remote Docker context.
@@ -16,13 +18,22 @@ for (const key of [
 }
 const cwd = fileURLToPath(new URL('..', import.meta.url));
 function docker(args, input) {
-  const result = spawnSync('docker', ['--host=unix:///var/run/docker.sock', ...args], {
-    env: dockerEnv,
-    encoding: 'utf8',
-    input,
-    maxBuffer: 1024 * 1024,
-    timeout: 120_000,
-  });
+  const result = spawnSync(
+    'docker',
+    [
+      process.platform === 'win32'
+        ? '--host=npipe:////./pipe/docker_engine'
+        : '--host=unix:///var/run/docker.sock',
+      ...args,
+    ],
+    {
+      env: dockerEnv,
+      encoding: 'utf8',
+      input,
+      maxBuffer: 1024 * 1024,
+      timeout: 120_000,
+    },
+  );
   if (result.status !== 0) throw new Error('Disposable PostgreSQL Docker operation failed.');
   return result.stdout.trim();
 }
@@ -137,6 +148,8 @@ try {
     END $$;
     CREATE ROLE vaultx_test LOGIN PASSWORD '${password}'
       NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+    CREATE ROLE vaultx_test_switched NOLOGIN;
+    GRANT vaultx_test_switched TO vaultx_test;
     ALTER DATABASE vaultx_pay_test OWNER TO vaultx_test;
     GRANT USAGE, CREATE ON SCHEMA public TO vaultx_test;
     CREATE SCHEMA vaultx_test_guard;
@@ -192,15 +205,28 @@ try {
   const testEnv = {
     ...process.env,
     NODE_ENV: 'test',
+    DATABASE_URL: '',
     TEST_DATABASE_URL: `postgres://vaultx_test:${password}@127.0.0.1:${port}/vaultx_pay_test`,
     TEST_DATABASE_TOKEN: token,
     LIVE_MODE_ENABLED: 'false',
     ALLOWED_PROVIDERS: 'simulator',
     SIMULATOR_CONTROLS_ENABLED: 'false',
   };
+  // Invoke npm's JS entry point directly: never pass paths/arguments through
+  // cmd.exe or shell:true (Windows .cmd launchers permit command injection).
+  const npmCli =
+    process.env.npm_execpath ??
+    path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+  if (!path.isAbsolute(npmCli) || !existsSync(npmCli) || path.basename(npmCli) !== 'npm-cli.js')
+    throw new Error('Run the isolated tests using npm run test:isolated.');
   async function npm(script) {
     const code = await new Promise((resolve, reject) => {
-      const child = spawn('npm', ['run', script], { cwd, env: testEnv, stdio: 'inherit' });
+      const child = spawn(process.execPath, [npmCli, 'run', script], {
+        cwd,
+        env: testEnv,
+        stdio: 'inherit',
+        shell: false,
+      });
       child.once('error', reject);
       child.once('exit', (status) => resolve(status ?? 1));
     });
