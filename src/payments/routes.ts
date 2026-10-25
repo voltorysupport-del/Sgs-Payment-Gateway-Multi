@@ -1,3 +1,4 @@
+import { paymentHistoryQuerySchema } from './history-contract.js';
 import { Router, type ErrorRequestHandler } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
@@ -43,29 +44,8 @@ export function createPaymentsRouter(pool: Pool): Router {
     next();
   });
 
-  const historySchema = z
-    .object({
-      limit: z
-        .string()
-        .regex(/^[1-9][0-9]*$/)
-        .transform(Number)
-        .pipe(z.number().int().max(100))
-        .default(25),
-      offset: z
-        .string()
-        .regex(/^(0|[1-9][0-9]*)$/)
-        .transform(Number)
-        .pipe(z.number().int().max(10000))
-        .default(0),
-      status: z.enum(['pending', 'succeeded', 'failed', 'cancelled']).optional(),
-      currency: z
-        .string()
-        .regex(/^[A-Z]{3}$/)
-        .optional(),
-    })
-    .strict();
   router.get('/', async (req, res) => {
-    const query = historySchema.safeParse(req.query);
+    const query = paymentHistoryQuerySchema.safeParse(req.query);
     if (!query.success) {
       sendError(res, 400, 'invalid_request', 'Invalid payment history filters or pagination.');
       return;

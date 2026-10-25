@@ -60,3 +60,15 @@ describe('logger redaction', () => {
     expect(text).not.toContain('COOKIE_SHOULD_NOT_APPEAR');
   });
 });
+
+it('redacts server-side dashboard credentials at both supported field depths', () => {
+  const { logger, output } = captureLogger();
+  const value = 'SYNTHETIC-PRIVATE-DASHBOARD-VALUE';
+  logger.info({
+    DASHBOARD_READ_ONLY_API_KEY: value,
+    dashboardReadOnlyApiKey: value,
+    config: { DASHBOARD_READ_ONLY_API_KEY: value, dashboardReadOnlyApiKey: value },
+  });
+  expect(output().includes(value)).toBe(false);
+  expect(output()).toContain(REDACTED);
+});

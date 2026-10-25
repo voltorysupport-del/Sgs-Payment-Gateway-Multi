@@ -1,4 +1,16 @@
+import type { Request } from 'express';
 import type { Pool } from 'pg';
+
+export const DASHBOARD_SESSION_COOKIE = '__Host-vaultx_session';
+export function dashboardSessionToken(req: Request): string | undefined {
+  const values = (req.headers.cookie ?? '')
+    .split(';')
+    .map((v) => v.trim())
+    .filter((v) => v.startsWith(DASHBOARD_SESSION_COOKIE + '='));
+  if (values.length !== 1) return undefined;
+  const value = values[0]!.slice(DASHBOARD_SESSION_COOKIE.length + 1);
+  return /^[a-f0-9]{64}$/.test(value) ? value : undefined;
+}
 
 export interface DashboardIdentity {
   user_id: string;

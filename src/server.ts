@@ -53,7 +53,7 @@ async function start(): Promise<void> {
 
   const app = createApp({ config, logger, pool });
 
-  const server = app.listen(config.port, () => {
+  const server = app.listen(config.port, '0.0.0.0', () => {
     logger.info(
       {
         port: config.port,

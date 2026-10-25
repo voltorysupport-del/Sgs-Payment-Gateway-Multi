@@ -1,0 +1,105 @@
+# Read-only dashboard BFF (default off)
+
+This milestone adds server-side reads only. There is no frontend, provisioning,
+new database migration, real credential, or Render change. Existing Bearer API,
+idempotency and simulator-only restrictions are preserved.
+
+## Routes and boundaries
+
+- GET /dashboard-api/payments and /dashboard-api/payments/ return history.
+- GET /dashboard-api/payments/:paymentId returns one UUID-identified payment.
+- GET /dashboard-api/status returns only status, gateway availability, database
+  reachability, provider=simulator and realPaymentsEnabled=false.
+
+These routes require the existing dashboard session cookie. Every request
+rechecks user status, membership identity/version, operator status and session
+expiry through the shared atomic session validator. The deployment's configured
+operator must match the session membership; there is no browser-selected tenant.
+The server key is authenticated against PostgreSQL on every request and must
+belong to that operator with exactly read_only permission. Revoked, unknown,
+mismatched and write-enabled keys fail closed. No credential is cached as valid.
+As with existing authentication, in-flight requests are not retroactively
+canceled; revocation takes effect at subsequent authentication boundaries.
+
+Only explicitly defined GET operations exist. HEAD and other methods return
+405; undefined reads return 404. Browser Authorization, Cookie, CSRF, Host and
+other headers are never forwarded upstream. Dashboard cookies never authorize
+payment creation or simulation on the original /payments API. No CORS or generic
+proxy is added. These GET operations need no CSRF mutation token; existing
+login/logout CSRF controls remain mandatory and unchanged.
+
+History uses the same strict query validator as the payment API: limit 1–100
+(default 25), offset 0–10000 (default 0), optional status and uppercase currency.
+Unknown/repeated parameters, operatorId, URL overrides and malformed UUIDs are
+rejected. Detail/status accept no query parameters. Offset pagination retains its
+existing non-snapshot behavior during concurrent inserts.
+
+## Fixed internal destination
+
+The BFF calls the real existing payment router using Node's native HTTP client,
+not duplicated payment SQL or an external Render URL. Destination is always
+127.0.0.1 and the same validated PORT used by the application listener. The server
+explicitly binds 0.0.0.0 so IPv4 loopback is available. Paths are built from a
+closed operation union: /payments with known query fields, /payments/:uuid, or
+/health. There is no upstream URL environment variable, dynamic host, generic
+method or browser-header forwarding. A private Agent does not inherit global
+proxy configuration. Redirects are never followed and requests never retry.
+
+This keeps HTTP within the same trusted container and avoids Render DNS, public
+TLS and cold-start loops. It does not weaken browser HTTPS or PostgreSQL TLS.
+No database connection/transaction is held while waiting for the internal HTTP
+response. This avoids a nested-request pool deadlock. The deployment must retain
+this single-service topology; a split service or untrusted local sidecar needs a
+new transport review. Failure to reach loopback fails closed, with no fallback.
+
+Upstream requests have a 2-second inactivity timeout and 5-second total deadline.
+Responses are limited to 256 KiB of actual bytes and must be JSON. Network errors,
+redirects, bad bodies and unexpected statuses become fixed sanitized errors;
+upstream messages/headers/cookies are never forwarded. Detail 404 is generic;
+upstream 401/403 makes the BFF unavailable. Success payloads are projected through
+schemas that permit only documented payment fields, enforce provider=simulator,
+validate pagination and check the requested detail ID. Unknown fields are stripped.
+All mounted BFF responses, including errors, use Cache-Control: no-store.
+
+Status's database=reachable means the session and key queries succeeded during
+that request; it is not a backup, migration, permissions, TLS or capacity audit.
+The upstream /health response must satisfy the simulator-only contract. Status
+exposes no hostname, credentials, database URL, key identifier or raw exceptions.
+
+## Configuration and later approval
+
+Both DASHBOARD_ENABLED and DASHBOARD_BFF_ENABLED default to false. BFF enablement
+requires the authentication gate plus:
+
+- DASHBOARD_PUBLIC_ORIGIN: the existing exact approved HTTPS origin.
+- DASHBOARD_OPERATOR_ID: the independently verified operator UUID (nonsecret).
+- DASHBOARD_READ_ONLY_API_KEY: a dedicated server-side secret for that operator.
+
+Missing/invalid settings refuse configuration. Runtime credential mismatch,
+revocation or incorrect permission refuses reads even if configuration passed.
+Keep LIVE_MODE_ENABLED=false and ALLOWED_PROVIDERS=simulator. Do not put the key
+in VITE_* variables, browser storage, URLs, source, logs or artifacts. Named secret
+fields are redacted defensively; the BFF never logs config or upstream bodies.
+
+No existing staging key is changed or reused automatically. The existing staging
+payment-test credential is not a substitute for a dedicated read-only key.
+Issuing that key and preparing a real dashboard user require separate approval
+and a reviewed administrator workflow; this PR provides no new provisioning tool.
+
+Before real enablement: approve the credential/account workflow, verify actual
+runtime database TLS and privileges and trusted ingress topology, and complete
+an HTTPS browser cookie/CSRF check. Supertest manually supplies cookies; passing
+these tests does not establish browser enforcement. See dashboard-auth.md for
+that evidence boundary and existing session/recovery/maintenance limitations.
+No deployment or staging payment/read is authorized by this change.
+
+## Validation
+
+Disposable PostgreSQL integration tests use synthetic helper-issued keys,
+synthetic users and hashed sessions plus a real IPv4-loopback gateway listener.
+They cover history/trailing slash, detail, status, two operators, disabled users,
+suspension/removal/expiry, revoked/mismatched/write-enabled credentials, invalid
+inputs, forbidden methods, unchanged Bearer behavior and output privacy.
+Transport unit tests cover the fixed destination/headers, both timeout paths,
+redirects, response-size bounds, invalid JSON/content types, aborts and errors.
+No real credentials or database settings are used by tests or CI.

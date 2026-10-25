@@ -27,6 +27,8 @@ export const REDACT_PATHS: readonly string[] = [
   'authorization',
   'databaseUrl',
   'DATABASE_URL',
+  'DASHBOARD_READ_ONLY_API_KEY',
+  'dashboardReadOnlyApiKey',
   '*.password',
   '*.secret',
   '*.token',
@@ -35,6 +37,8 @@ export const REDACT_PATHS: readonly string[] = [
   '*.authorization',
   '*.databaseUrl',
   '*.DATABASE_URL',
+  '*.DASHBOARD_READ_ONLY_API_KEY',
+  '*.dashboardReadOnlyApiKey',
 ];
 
 export interface LoggerOptions {
