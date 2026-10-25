@@ -13,7 +13,11 @@ import {
   STAGING_OPERATOR_NAME,
   verifyStagingTarget,
 } from '../../src/admin/staging-operator.js';
-import { authenticateOperatorKey, type IssuedOperatorKey } from '../../src/db/operator-keys.js';
+import {
+  authenticateOperatorKey,
+  createOperatorWithApiKey,
+  type IssuedOperatorKey,
+} from '../../src/db/operator-keys.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { createApp } from '../../src/app.js';
 import { captureLogger, testConfig } from '../helpers.js';
@@ -241,6 +245,48 @@ describe('staging provisioning on disposable PostgreSQL only', { timeout: 30_000
     expect(metadata.keys).toHaveLength(2);
     expect((await readFile(destination, 'utf8')) === originalFile).toBe(true);
     expect((await readIssuedKey(destination)).apiKey === fresh.apiKey).toBe(true);
+  });
+
+  it('preserves read-only permissions across rotation and duplicate rotation without enabling writes', async () => {
+    const old = await createOperatorWithApiKey(
+      pool,
+      STAGING_OPERATOR_NAME,
+      code,
+      'Read-only',
+      'read_only',
+    );
+    const destination = path.join(directory, 'readonly-rotation.vaultx-key.json');
+    expect((await cli('rotate', ['--key-id', old.keyId, '--key-file', destination])).status).toBe(
+      0,
+    );
+    const fresh = await readIssuedKey(destination);
+    const originalFile = await readFile(destination, 'utf8');
+    expect((await authenticateOperatorKey(pool, fresh.apiKey))?.permission).toBe('read_only');
+    expect(await authenticateOperatorKey(pool, old.apiKey)).toBeNull();
+    expect((await cli('rotate', ['--key-id', old.keyId, '--key-file', destination])).status).toBe(
+      0,
+    );
+    expect(await readFile(destination, 'utf8')).toBe(originalFile);
+    expect(
+      (
+        await pool.query('SELECT id FROM operator_api_keys WHERE operator_id = $1', [
+          old.operatorId,
+        ])
+      ).rowCount,
+    ).toBe(2);
+    const app = createApp({ config: testConfig(), logger: captureLogger().logger, pool });
+    await request(app).get('/payments').auth(fresh.apiKey, { type: 'bearer' }).expect(200);
+    await request(app)
+      .post('/payments')
+      .auth(fresh.apiKey, { type: 'bearer' })
+      .set('Idempotency-Key', randomUUID())
+      .send({ amountMinor: 100, currency: 'EUR' })
+      .expect(403);
+    await request(app)
+      .post('/payments/' + randomUUID() + '/simulate')
+      .auth(fresh.apiKey, { type: 'bearer' })
+      .send({ outcome: 'succeeded' })
+      .expect(403);
   });
 
   it('rolls back old-key revocation when rotation delivery fails', async () => {

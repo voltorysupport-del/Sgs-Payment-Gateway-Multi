@@ -475,9 +475,24 @@ describe('simulated payment lifecycle', () => {
 
 describe('read-only operator payment history', () => {
   async function readonlyKey() {
-    await pool.query("UPDATE operator_api_keys SET permission = 'read_only' WHERE id = $1", [
-      keyId,
+    const reader = await createOperatorWithApiKey(
+      pool,
+      'Read-only fixture',
+      'reader_' + randomUUID(),
+      'Read-only',
+      'read_only',
+    );
+    otherOperatorIds.push(reader.operatorId);
+    // Reassign fixture ownership while retaining the actual helper-issued key.
+    await pool.query('UPDATE payments SET operator_id = $1 WHERE operator_id = $2', [
+      reader.operatorId,
+      operatorId,
     ]);
+    apiKey = reader.apiKey;
+    keyId = reader.keyId;
+    const previous = operatorId;
+    operatorId = reader.operatorId;
+    otherOperatorIds.push(previous);
   }
   async function createFixture(currency = 'EUR') {
     return request(app)
@@ -523,12 +538,35 @@ describe('read-only operator payment history', () => {
     const other = await createOperatorWithApiKey(pool, 'Other history', 'other_' + randomUUID());
     otherOperatorIds.push(other.operatorId);
     await readonlyKey();
+    await pool.query(
+      "UPDATE payments SET created_at = '2026-01-01T00:00:00Z' WHERE operator_id = $1",
+      [operatorId],
+    );
+    const ordered = await pool.query(
+      'SELECT id FROM payments WHERE operator_id = $1 ORDER BY created_at DESC, id DESC',
+      [operatorId],
+    );
     const page = await request(app)
       .get('/payments?limit=1&offset=0')
       .auth(apiKey, { type: 'bearer' })
       .expect(200);
     expect(page.body.payments).toHaveLength(1);
     expect(page.body.pagination.hasMore).toBe(true);
+    const second = await request(app)
+      .get('/payments?limit=1&offset=1')
+      .auth(apiKey, { type: 'bearer' })
+      .expect(200);
+    expect(second.body.payments).toHaveLength(1);
+    expect(second.body.pagination.hasMore).toBe(false);
+    expect([page.body.payments[0].id, second.body.payments[0].id]).toEqual(
+      ordered.rows.map((row: { id: string }) => row.id),
+    );
+    expect(second.body.payments[0].id).not.toBe(page.body.payments[0].id);
+    const repeated = await request(app)
+      .get('/payments?limit=1&offset=0')
+      .auth(apiKey, { type: 'bearer' })
+      .expect(200);
+    expect(repeated.body).toEqual(page.body);
     const filtered = await request(app)
       .get('/payments?currency=EUR&status=pending')
       .auth(apiKey, { type: 'bearer' })
@@ -561,6 +599,13 @@ describe('read-only operator payment history', () => {
         .expect(400);
     }
     await request(app).get('/payments').expect(401);
+    await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operatorId]);
+    await request(app).get('/payments').auth(apiKey, { type: 'bearer' }).expect(401);
+    await request(app)
+      .get('/payments/' + created.body.id)
+      .auth(apiKey, { type: 'bearer' })
+      .expect(401);
+    await pool.query("UPDATE operators SET status = 'active' WHERE id = $1", [operatorId]);
     await revokeOperatorKey(pool, keyId, operatorId);
     await request(app).get('/payments').auth(apiKey, { type: 'bearer' }).expect(401);
   });
