@@ -1,0 +1,53 @@
+name: Read-only issuance reconciliation package
+on:
+  pull_request:
+    branches: ['feature/step-1-project-setup']
+    paths:
+      - 'tools/staging-reconciliation/**'
+      - '.github/workflows/staging-reconciliation.yml'
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: ''
+      TEST_DATABASE_URL: ''
+      TEST_DATABASE_TOKEN: ''
+      LIVE_MODE_ENABLED: 'false'
+      ALLOWED_PROVIDERS: simulator
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --include=dev --ignore-scripts
+      - name: Build read-only reconciliation ZIP input
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP 'VaultX Reconciliation & Offline'
+          "RECON_PACKAGE=$package" >> $env:GITHUB_ENV
+          node tools/staging-reconciliation/build-package.js "$package"
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Native DPAPI, privacy, read-only SQL and original diagnostic regression
+        run: node tools/staging-reconciliation/validate-package.js "$env:RECON_PACKAGE"
+      - uses: actions/upload-artifact@v4
+        id: artifact
+        with:
+          name: VaultX-READ-ONLY-Issuance-Reconciliation
+          path: '${{ env.RECON_PACKAGE }}/'
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/download-artifact@v4
+        with:
+          name: VaultX-READ-ONLY-Issuance-Reconciliation
+          path: '${{ runner.temp }}/VaultX Reconciliation Downloaded & Verified'
+      - name: Verify actual downloaded ZIP and repeat native tests
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP 'VaultX Reconciliation Downloaded & Verified'
+          node tools/staging-reconciliation/validate-package.js "$download"
+          if ($LASTEXITCODE -ne 0) { throw 'Downloaded artifact validation failed' }
+          '[Read-only reconciliation ZIP](${{ steps.artifact.outputs.artifact-url }})' >> $env:GITHUB_STEP_SUMMARY
