@@ -6,22 +6,16 @@ import { z } from 'zod';
 import type { Config } from '../config/index.js';
 import { sendError } from '../shared/http-errors.js';
 import { maintainDashboardAuth } from './maintenance.js';
-import { touchDashboardSession } from './sessions.js';
+import {
+  dashboardSessionToken as sessionToken,
+  DASHBOARD_SESSION_COOKIE as cookieName,
+  touchDashboardSession,
+} from './sessions.js';
 import { dummyPasswordHash, verifyDashboardPassword } from './passwords.js';
 
-const cookieName = '__Host-vaultx_session';
 const cookieOptions = { secure: true, httpOnly: true, sameSite: 'lax' as const, path: '/' };
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const token = () => randomBytes(32).toString('hex');
-function sessionToken(req: Request): string | undefined {
-  const values = (req.headers.cookie ?? '')
-    .split(';')
-    .map((v) => v.trim())
-    .filter((v) => v.startsWith(cookieName + '='));
-  if (values.length !== 1) return undefined;
-  const value = values[0]!.slice(cookieName.length + 1);
-  return /^[a-f0-9]{64}$/.test(value) ? value : undefined;
-}
 interface Session {
   token_hash: string;
   csrf_hash: string;

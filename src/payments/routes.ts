@@ -1,3 +1,6 @@
+import { paymentHistoryQuerySchema } from './history-contract.js';
+import { readRestriction, InvalidReadRestriction } from './internal-read.js';
+import { ReadUnavailable } from '../db/read-client.js';
 import { Router, type ErrorRequestHandler } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
@@ -30,7 +33,19 @@ export function createPaymentsRouter(pool: Pool): Router {
   router.use(async (req, res, next) => {
     const authorization = req.header('authorization');
     const apiKey = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
-    const operator = apiKey ? await authenticateOperatorKey(pool, apiKey) : null;
+    let restriction;
+    try {
+      restriction = readRestriction(req, apiKey);
+    } catch {
+      sendError(res, 403, 'forbidden', 'Internal read authorization refused.');
+      return;
+    }
+    const operator = apiKey
+      ? await authenticateOperatorKey(pool, apiKey, {
+          restriction,
+          bounded: req.method === 'GET' || req.method === 'HEAD',
+        })
+      : null;
     if (!operator) {
       sendError(res, 401, 'unauthorized', 'A valid operator API key is required.');
       return;
@@ -43,29 +58,8 @@ export function createPaymentsRouter(pool: Pool): Router {
     next();
   });
 
-  const historySchema = z
-    .object({
-      limit: z
-        .string()
-        .regex(/^[1-9][0-9]*$/)
-        .transform(Number)
-        .pipe(z.number().int().max(100))
-        .default(25),
-      offset: z
-        .string()
-        .regex(/^(0|[1-9][0-9]*)$/)
-        .transform(Number)
-        .pipe(z.number().int().max(10000))
-        .default(0),
-      status: z.enum(['pending', 'succeeded', 'failed', 'cancelled']).optional(),
-      currency: z
-        .string()
-        .regex(/^[A-Z]{3}$/)
-        .optional(),
-    })
-    .strict();
   router.get('/', async (req, res) => {
-    const query = historySchema.safeParse(req.query);
+    const query = paymentHistoryQuerySchema.safeParse(req.query);
     if (!query.success) {
       sendError(res, 400, 'invalid_request', 'Invalid payment history filters or pagination.');
       return;
@@ -140,6 +134,10 @@ export function createPaymentsRouter(pool: Pool): Router {
   });
 
   const conflictHandler: ErrorRequestHandler = (error: unknown, _req, res, next) => {
+    if (error instanceof ReadUnavailable || error instanceof InvalidReadRestriction) {
+      sendError(res, 503, 'unavailable', 'Payment reads temporarily unavailable.');
+      return;
+    }
     if (error instanceof PaymentConflict) {
       sendError(res, 409, error.code, error.message);
       return;

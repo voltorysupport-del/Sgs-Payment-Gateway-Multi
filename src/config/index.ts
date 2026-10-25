@@ -32,6 +32,17 @@ const booleanFlag = (name: string) =>
 const envSchema = z
   .object({
     DASHBOARD_ENABLED: booleanFlag('DASHBOARD_ENABLED'),
+    DASHBOARD_BFF_ENABLED: booleanFlag('DASHBOARD_BFF_ENABLED'),
+    DASHBOARD_OPERATOR_ID: z
+      .uuid()
+      .transform((value) => value.toLowerCase())
+      .optional(),
+    DASHBOARD_READ_ONLY_API_KEY: z
+      .string()
+      .optional()
+      .refine((value) => value === undefined || /^vxp_[a-f0-9]{64}$/.test(value), {
+        message: 'DASHBOARD_READ_ONLY_API_KEY must use the operator key format',
+      }),
     DASHBOARD_PUBLIC_ORIGIN: z
       .string()
       .optional()
@@ -114,6 +125,26 @@ const envSchema = z
     SIMULATOR_CONTROLS_ENABLED: booleanFlag('SIMULATOR_CONTROLS_ENABLED'),
   })
   .superRefine((env, ctx) => {
+    if (env.DASHBOARD_BFF_ENABLED) {
+      if (!env.DASHBOARD_ENABLED)
+        ctx.addIssue({
+          code: 'custom',
+          path: ['DASHBOARD_BFF_ENABLED'],
+          message: 'Requires DASHBOARD_ENABLED',
+        });
+      if (!env.DASHBOARD_OPERATOR_ID)
+        ctx.addIssue({
+          code: 'custom',
+          path: ['DASHBOARD_OPERATOR_ID'],
+          message: 'Required for dashboard BFF',
+        });
+      if (!env.DASHBOARD_READ_ONLY_API_KEY)
+        ctx.addIssue({
+          code: 'custom',
+          path: ['DASHBOARD_READ_ONLY_API_KEY'],
+          message: 'Required for dashboard BFF',
+        });
+    }
     if (env.DASHBOARD_ENABLED && !env.DASHBOARD_PUBLIC_ORIGIN)
       ctx.addIssue({
         code: 'custom',
@@ -130,6 +161,9 @@ const envSchema = z
   });
 
 export interface Config {
+  readonly dashboardBffEnabled: boolean;
+  readonly dashboardOperatorId: string | undefined;
+  readonly dashboardReadOnlyApiKey: string | undefined;
   readonly dashboardEnabled: boolean;
   readonly dashboardPublicOrigin: string | undefined;
   readonly dashboardTrustedProxies: readonly string[];
@@ -176,6 +210,9 @@ export function loadConfig(env: EnvSource = process.env): Config {
 
   return Object.freeze({
     dashboardEnabled: parsed.DASHBOARD_ENABLED,
+    dashboardBffEnabled: parsed.DASHBOARD_BFF_ENABLED,
+    dashboardOperatorId: parsed.DASHBOARD_OPERATOR_ID,
+    dashboardReadOnlyApiKey: parsed.DASHBOARD_READ_ONLY_API_KEY,
     dashboardPublicOrigin: parsed.DASHBOARD_PUBLIC_ORIGIN,
     dashboardTrustedProxies: Object.freeze(parsed.DASHBOARD_TRUSTED_PROXIES),
     nodeEnv: parsed.NODE_ENV,

@@ -1,3 +1,5 @@
+import { readRestriction } from './payments/internal-read.js';
+import { authenticateOperatorKey } from './db/operator-keys.js';
 import { randomUUID } from 'node:crypto';
 import express, { type ErrorRequestHandler, type Express } from 'express';
 import helmet from 'helmet';
@@ -5,6 +7,7 @@ import { pinoHttp } from 'pino-http';
 import type { Pool } from 'pg';
 import type { Config } from './config/index.js';
 import { assertRealPaymentsDisabled } from './config/safety.js';
+import { createDashboardBff } from './dashboard/bff.js';
 import { createDashboardAuthRouter } from './dashboard/routes.js';
 import { createPaymentsRouter } from './payments/routes.js';
 import { sendError } from './shared/http-errors.js';
@@ -56,9 +59,27 @@ export function createApp({ config, logger, pool }: AppDependencies): Express {
   if (config.dashboardEnabled)
     app.use('/dashboard-api/auth', createDashboardAuthRouter(pool, config));
 
+  if (config.dashboardEnabled && config.dashboardBffEnabled)
+    app.use('/dashboard-api', createDashboardBff(pool, config));
+
   app.use(express.json({ limit: '100kb' }));
 
-  app.get('/health', (_req, res) => {
+  app.get('/health', async (req, res) => {
+    const header = req.header('authorization');
+    const key = header?.startsWith('Bearer ') ? header.slice(7) : '';
+    try {
+      const restriction = readRestriction(req, key);
+      if (
+        restriction &&
+        !(await authenticateOperatorKey(pool, key, { restriction, bounded: true }))
+      ) {
+        sendError(res, 401, 'unauthorized', 'Authentication required.');
+        return;
+      }
+    } catch {
+      sendError(res, 503, 'unavailable', 'Health read unavailable.');
+      return;
+    }
     res.json({
       status: 'ok',
       service: 'vaultx-pay',
