@@ -2,7 +2,13 @@ import { Router, type ErrorRequestHandler } from 'express';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { authenticateOperatorKey, type AuthenticatedOperator } from '../db/operator-keys.js';
-import { createPayment, getPayment, PaymentConflict, simulatePayment } from '../db/payments.js';
+import {
+  createPayment,
+  getPayment,
+  listPayments,
+  PaymentConflict,
+  simulatePayment,
+} from '../db/payments.js';
 import { sendError } from '../shared/http-errors.js';
 
 const paymentSchema = z
@@ -29,8 +35,43 @@ export function createPaymentsRouter(pool: Pool): Router {
       sendError(res, 401, 'unauthorized', 'A valid operator API key is required.');
       return;
     }
+    if (req.method !== 'GET' && req.method !== 'HEAD' && operator.permission !== 'read_write') {
+      sendError(res, 403, 'forbidden', 'This credential permits read-only access.');
+      return;
+    }
     res.locals.operator = operator;
     next();
+  });
+
+  const historySchema = z
+    .object({
+      limit: z
+        .string()
+        .regex(/^[1-9][0-9]*$/)
+        .transform(Number)
+        .pipe(z.number().int().max(100))
+        .default(25),
+      offset: z
+        .string()
+        .regex(/^(0|[1-9][0-9]*)$/)
+        .transform(Number)
+        .pipe(z.number().int().max(10000))
+        .default(0),
+      status: z.enum(['pending', 'succeeded', 'failed', 'cancelled']).optional(),
+      currency: z
+        .string()
+        .regex(/^[A-Z]{3}$/)
+        .optional(),
+    })
+    .strict();
+  router.get('/', async (req, res) => {
+    const query = historySchema.safeParse(req.query);
+    if (!query.success) {
+      sendError(res, 400, 'invalid_request', 'Invalid payment history filters or pagination.');
+      return;
+    }
+    const operator = res.locals.operator as AuthenticatedOperator;
+    res.json(await listPayments(pool, operator.id, query.data));
   });
 
   router.post('/', async (req, res) => {

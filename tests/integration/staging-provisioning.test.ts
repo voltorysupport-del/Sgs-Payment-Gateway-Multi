@@ -176,7 +176,11 @@ describe('staging provisioning on disposable PostgreSQL only', { timeout: 30_000
   it('issues an authentication-compatible key and stores only its hash', async () => {
     const key = await issue();
     expect(/^vxp_[a-f0-9]{64}$/.test(key.apiKey)).toBe(true);
-    expect(await authenticateOperatorKey(pool, key.apiKey)).toEqual({ id: key.operatorId, code });
+    expect(await authenticateOperatorKey(pool, key.apiKey)).toEqual({
+      id: key.operatorId,
+      code,
+      permission: 'read_write',
+    });
     const persisted = await pool.query<{ key_hash: string }>(
       'SELECT key_hash FROM operator_api_keys WHERE id = $1',
       [key.keyId],
@@ -223,7 +227,11 @@ describe('staging provisioning on disposable PostgreSQL only', { timeout: 30_000
     const fresh = await readIssuedKey(destination);
     expect(fresh.apiKey === old.apiKey).toBe(false);
     expect(await authenticateOperatorKey(pool, old.apiKey)).toBeNull();
-    expect(await authenticateOperatorKey(pool, fresh.apiKey)).toEqual({ id: old.operatorId, code });
+    expect(await authenticateOperatorKey(pool, fresh.apiKey)).toEqual({
+      id: old.operatorId,
+      code,
+      permission: 'read_write',
+    });
     const originalFile = await readFile(destination, 'utf8');
     const retry = await cli('rotate', ['--key-id', old.keyId, '--key-file', destination]);
     expect(retry.status).toBe(0);

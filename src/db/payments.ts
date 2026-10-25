@@ -123,3 +123,37 @@ export async function simulatePayment(
     client.release();
   }
 }
+
+/** Bounded, deterministic history; offset pagination is not a snapshot. */
+export async function listPayments(
+  pool: Pool,
+  operatorId: string,
+  options: {
+    limit: number;
+    offset: number;
+    status?: string;
+    currency?: string;
+  },
+) {
+  const result = await pool.query<PaymentRow>(
+    `SELECT ${columns} FROM payments
+     WHERE operator_id = $1 AND ($2::text IS NULL OR status = $2)
+       AND ($3::text IS NULL OR currency = $3)
+     ORDER BY created_at DESC, id DESC LIMIT $4 OFFSET $5`,
+    [
+      operatorId,
+      options.status ?? null,
+      options.currency ?? null,
+      options.limit + 1,
+      options.offset,
+    ],
+  );
+  return {
+    payments: result.rows.slice(0, options.limit).map(serialize),
+    pagination: {
+      limit: options.limit,
+      offset: options.offset,
+      hasMore: result.rows.length > options.limit,
+    },
+  };
+}
