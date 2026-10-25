@@ -46,16 +46,22 @@ Passwords use Argon2id (19 MiB, two iterations, parallelism one), independent
 salts, 15–128 characters, without password trimming or arbitrary composition
 rules. Usernames are lowercased ASCII identifiers. Unknown accounts undergo a
 dummy verification. Invalid credentials, disabled users, missing memberships
-and suspended operators produce generic authentication failures. A random dummy
-verifier is initialized lazily; first-use latency is not a timing-proof guarantee.
+and suspended operators produce generic authentication failures. The random dummy
+verifier is initialized before the HTTP listener starts when the dashboard is
+enabled. Embedded apps also await initialization before login database work.
+This removes first-unknown-account hashing overhead, not every possible timing
+difference; no claim of perfectly constant-time network authentication is made.
 Parameter benchmarking and load testing remain necessary before broader access.
 
 ## Abuse controls and invalidation
 
 PostgreSQL atomic fixed-window counters: 30 login requests per client IP and
-5 valid-shaped attempts per normalized username per 15 minutes; CSRF issuance
+5 CSRF-validated password attempts per normalized username per 15 minutes; CSRF issuance
 is limited to 60 per IP per 15 minutes. Limits persist across process restarts.
-Blocked IPs cannot allocate additional account buckets. Account throttling can
+Invalid login Origins are rejected before JSON parsing or database work. An
+early IP allowance applies to same-origin requests, including invalid CSRF.
+Named-account budgets are charged only after valid pre-authentication CSRF and
+valid credential shape. Blocked IPs cannot allocate additional account buckets. Account throttling can
 be abused to temporarily deny a known user's login; there is no permanent lockout.
 No CAPTCHA/email service is added. At most two Argon2 login verifications execute
 per app router, with no password work queue. Rate-limit failures return 429 and
@@ -63,7 +69,11 @@ conservative Retry-After. Database failure refuses authentication with sanitized
 503 errors, never a fallback in-memory session or limiter.
 
 Every identity lookup rechecks user status, membership identity, operator status,
-auth_version and expiry. Removal deletes sessions via foreign keys. Membership
+auth_version and expiry. Identity refresh locks the identity rows and session in
+one transaction and rechecks wall-clock expiry after acquiring the session lock.
+A delayed refresh cannot extend an expired session. Local statement/lock timeouts
+bound those transactions. Login captures the initial membership and auth_version
+and verifies them again under shared row locks before issuing a session. Removal deletes sessions via foreign keys. Membership
 updates, password/status changes and operator suspension invalidate sessions via
 triggers. Recreating a membership must use a fresh UUID. Existing in-flight
 requests cannot be retroactively canceled; this foundation exposes no payment
@@ -109,12 +119,44 @@ Treat password verifiers as sensitive. Review trigger execution permissions when
 splitting roles; do not grant runtime password/account administration.
 Schema-owner authority is not dashboard administrator authority.
 
-An approved bounded maintenance job must remove expired sessions and limiter
-buckets (retaining only policy-approved audit metadata); no background service or
-maintenance endpoint is added here. Fixed-window limits and IP limits are not
+Request-driven maintenance runs at most once per minute per pool, with one
+in-flight batch shared by all routers. Each transaction deletes at most 100
+expired sessions and 100 expired limiter buckets, skipping locked rows and using
+statement/lock deadlines. Active sessions and current limiter windows are
+preserved. Cleanup occurs on admitted CSRF/login traffic; no traffic means no
+cleanup, and backlog reclamation is gradual. There is no scheduler, timer, cron
+service or maintenance endpoint. Initial-batch failure returns a sanitized 503
+for waiting requests; it never bypasses authentication. Request-driven cleanup
+bounds work, not total database size under a sufficiently distributed attack. Fixed-window limits and IP limits are not
 DDoS protection. MFA, durable admin audit infrastructure, breached-password checks,
 load testing and operational alerting remain later hardening work. Secure cookies
 require a real HTTPS origin; do not bypass local browser protections.
 
 Validation: disposable PostgreSQL integration tests, Argon2 unit tests, existing
 payment regressions, native Windows Argon2/DPAPI/parser CI. No staging tests.
+
+## Browser evidence boundary
+
+Supertest manually sends cookie headers. It proves server response attributes,
+CSRF checks and database behavior, not browser enforcement of Secure, HttpOnly,
+SameSite or __Host- restrictions. Before real browser enablement, run an approved
+HTTPS browser test using synthetic accounts: cookie acceptance on the intended
+origin, rejection on HTTP/wrong host, JavaScript inability to read the cookie,
+cross-site POST rejection, same-site sibling-origin attacks, login/logout and
+expiry across tabs. No staging browser test was performed. Do not weaken cookie
+flags or TLS to make a local HTTP test work.
+
+Migration 004 explicitly targets public tables. Trigger functions are SECURITY
+INVOKER, use qualified references and pin search_path to pg_catalog, public,
+pg_temp. A different caller search_path or temporary shadow table cannot redirect
+invalidation. Tests apply the unmodified SQL to a third empty, token-verified
+upgrade-only database in the existing disposable container; no shared schema is
+reset. Populated schema-003 records survive upgrade and injected-failure rollback.
+Migration rollback removes its new tables/functions/triggers and migration record;
+rolling back application code after a committed migration does not undo those
+objects. Dashboard remains off until separately approved for enablement.
+
+Because 004 is still an unmerged draft migration, this PR revises it in place.
+If an older draft of 004 was applied outside disposable tests, startup will not
+reapply the same filename. Do not reset that database or assume redeployment
+updates its triggers; obtain approval for an explicit follow-up migration.

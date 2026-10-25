@@ -176,7 +176,9 @@ try {
       '--set=ON_ERROR_STOP=1',
     ],
     `CREATE DATABASE vaultx_pay_staging OWNER vaultx_test;
-      COMMENT ON DATABASE vaultx_pay_staging IS 'vaultx-pay:staging';`,
+      COMMENT ON DATABASE vaultx_pay_staging IS 'vaultx-pay:staging';
+      CREATE DATABASE vaultx_pay_upgrade_test OWNER vaultx_test;
+      COMMENT ON DATABASE vaultx_pay_upgrade_test IS 'vaultx-test-upgrade:${token}';`,
   );
   // Trust was used only to bootstrap this fresh container. TCP test connections
   // must now authenticate; Unix-socket access remains local to the container.
@@ -273,6 +275,25 @@ try {
     throw new Error('Staging CLI test fixtures were not cleaned up.');
   process.stdout.write(
     'Confirmed in both disposable databases: 4 migrations applied; 0 operators, API keys, payments, dashboard users, memberships, sessions or limit buckets remain.\n',
+  );
+  const upgradeRemaining = docker([
+    'exec',
+    '--user',
+    'postgres',
+    container,
+    'psql',
+    '-X',
+    '--quiet',
+    '--tuples-only',
+    '--no-align',
+    '--username=vaultx_test',
+    '--dbname=vaultx_pay_upgrade_test',
+    '--set=ON_ERROR_STOP=1',
+    "--command=SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'",
+  ]);
+  if (upgradeRemaining !== '0') throw new Error('Upgrade test transaction was not rolled back.');
+  process.stdout.write(
+    'Confirmed upgrade-only disposable database retains zero public relations.\n',
   );
   if (check) await npm('build');
 } catch (error) {

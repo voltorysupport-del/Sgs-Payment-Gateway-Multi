@@ -5,6 +5,8 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import type { Config } from '../config/index.js';
 import { sendError } from '../shared/http-errors.js';
+import { maintainDashboardAuth } from './maintenance.js';
+import { touchDashboardSession } from './sessions.js';
 import { dummyPasswordHash, verifyDashboardPassword } from './passwords.js';
 
 const cookieName = '__Host-vaultx_session';
@@ -96,8 +98,23 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
   const router = Router();
   // Bound expensive verification concurrency without an unbounded password queue.
   let verifying = 0;
+  const ready = dummyPasswordHash();
+  // Embedded apps fail closed on initialization errors without an unhandled rejection.
+  void ready.catch(() => undefined);
   router.use((_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
+  // Reject invalid login Origins before parsing or any database/limiter work.
+  router.use((req, res, next) => {
+    if (
+      req.method === 'POST' &&
+      /^\/login\/?$/i.test(req.path) &&
+      req.header('origin') !== config.dashboardPublicOrigin
+    ) {
+      sendError(res, 403, 'forbidden', 'Request refused.');
+      return;
+    }
     next();
   });
   router.use(json({ limit: '4kb' }));
@@ -110,6 +127,7 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
       sendError(res, 403, 'forbidden', 'Request refused.');
       return;
     }
+    await maintainDashboardAuth(pool);
     if (!(await rate(pool, 'csrf-ip:' + clientAddress(req), 60))) {
       res.setHeader('Retry-After', '900');
       sendError(res, 429, 'rate_limited', 'Try again later.');
@@ -133,6 +151,9 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
     res.json({ csrfToken });
   });
   router.post('/login', async (req, res) => {
+    // Await initialization for embedded/test apps too; server.ts warms before listen.
+    const dummyVerifier = await ready;
+    await maintainDashboardAuth(pool);
     const ipAllowed = await rate(pool, 'login-ip:' + clientAddress(req), 30);
     if (!ipAllowed) {
       res.setHeader('Retry-After', '900');
@@ -140,14 +161,6 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
       return;
     }
     const parsed = credentials.safeParse(req.body);
-    const accountAllowed = parsed.success
-      ? await rate(pool, 'login-user:' + parsed.data.username, 5)
-      : true;
-    if (!accountAllowed) {
-      res.setHeader('Retry-After', '900');
-      sendError(res, 429, 'rate_limited', 'Try again later.');
-      return;
-    }
     const pre = await session(pool, req);
     if (!pre || pre.user_id !== null || !csrf(req, pre, config.dashboardPublicOrigin!)) {
       sendError(res, 403, 'forbidden', 'Request refused.');
@@ -155,6 +168,14 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
     }
     if (!parsed.success) {
       sendError(res, 401, 'unauthorized', 'Invalid credentials.');
+      return;
+    }
+    const accountAllowed = parsed.success
+      ? await rate(pool, 'login-user:' + parsed.data.username, 5)
+      : true;
+    if (!accountAllowed) {
+      res.setHeader('Retry-After', '900');
+      sendError(res, 429, 'rate_limited', 'Try again later.');
       return;
     }
     // Admission must be checked after the asynchronous session lookup.
@@ -165,13 +186,20 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
     }
     verifying++;
     try {
-      const users = await pool.query<{ id: string; password_hash: string }>(
-        'SELECT id, password_hash FROM dashboard_users WHERE username = $1',
+      const users = await pool.query<{
+        id: string;
+        password_hash: string;
+        auth_version: number;
+        membership_id: string | null;
+        operator_id: string | null;
+      }>(
+        `SELECT u.id, u.password_hash, u.auth_version, m.id AS membership_id, m.operator_id
+         FROM public.dashboard_users u LEFT JOIN public.dashboard_memberships m ON m.user_id = u.id WHERE u.username = $1`,
         [parsed.data.username],
       );
       const user = users.rows[0];
       const valid = await verifyDashboardPassword(
-        user?.password_hash ?? (await dummyPasswordHash()),
+        user?.password_hash ?? dummyVerifier,
         parsed.data.password,
       );
       if (!valid || !user) {
@@ -183,10 +211,17 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
         csrfToken = token();
       try {
         await client.query('BEGIN');
+        await client.query(
+          "SET LOCAL statement_timeout = '5000ms'; SET LOCAL lock_timeout = '2000ms'",
+        );
+        await client.query(
+          'SELECT token_hash FROM public.dashboard_sessions WHERE token_hash = $1 FOR UPDATE',
+          [pre.token_hash],
+        );
         // Consume pre-auth token atomically: parallel submissions cannot both log in.
         const consumed = await client.query(
-          `DELETE FROM dashboard_sessions WHERE token_hash = $1 AND csrf_hash = $2
-          AND user_id IS NULL AND created_at > NOW() - INTERVAL '10 minutes' RETURNING token_hash`,
+          `DELETE FROM public.dashboard_sessions WHERE token_hash = $1 AND csrf_hash = $2
+          AND user_id IS NULL AND created_at > clock_timestamp() - INTERVAL '10 minutes' RETURNING token_hash`,
           [pre.token_hash, pre.csrf_hash],
         );
         const inserted = consumed.rowCount
@@ -194,9 +229,18 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
               `INSERT INTO dashboard_sessions(token_hash, csrf_hash, user_id, membership_id, auth_version)
           SELECT $1, $2, u.id, m.id, u.auth_version FROM dashboard_users u
           JOIN dashboard_memberships m ON m.user_id = u.id JOIN operators o ON o.id = m.operator_id
-          WHERE u.id = $3 AND u.password_hash = $4 AND u.status = 'active' AND o.status = 'active'
+          WHERE u.id = $3 AND u.password_hash = $4 AND u.auth_version = $5
+            AND m.id = $6 AND m.operator_id = $7 AND u.status = 'active' AND o.status = 'active'
           FOR SHARE OF u, m, o RETURNING token_hash`,
-              [digest(value), digest(csrfToken), user.id, user.password_hash],
+              [
+                digest(value),
+                digest(csrfToken),
+                user.id,
+                user.password_hash,
+                user.auth_version,
+                user.membership_id,
+                user.operator_id,
+              ],
             )
           : undefined;
         if (!inserted?.rowCount) {
@@ -218,14 +262,12 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
     }
   });
   router.get('/me', async (req, res) => {
-    const s = await session(pool, req);
-    if (!s?.user_id) {
+    const value = sessionToken(req);
+    const s = value ? await touchDashboardSession(pool, digest(value)) : undefined;
+    if (!s) {
       sendError(res, 401, 'unauthorized', 'Authentication required.');
       return;
     }
-    await pool.query('UPDATE dashboard_sessions SET last_seen_at = NOW() WHERE token_hash = $1', [
-      s.token_hash,
-    ]);
     res.json({
       user: { id: s.user_id, username: s.username },
       operator: { id: s.operator_id },

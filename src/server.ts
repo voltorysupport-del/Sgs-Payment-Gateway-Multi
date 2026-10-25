@@ -5,6 +5,7 @@
  * Real payment processing remains disabled.
  */
 import { existsSync } from 'node:fs';
+import { dummyPasswordHash } from './dashboard/passwords.js';
 import { createApp } from './app.js';
 import { ConfigError, loadConfig, type Config } from './config/index.js';
 import { checkDatabase, createPool } from './db/pool.js';
@@ -42,6 +43,7 @@ async function start(): Promise<void> {
   try {
     await checkDatabase(pool);
     await runMigrations(pool);
+    if (config.dashboardEnabled) await dummyPasswordHash();
   } catch (error) {
     logger.error({ err: error }, 'Database initialization failed');
     await pool.end();
