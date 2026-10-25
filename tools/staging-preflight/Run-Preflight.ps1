@@ -18,7 +18,9 @@ try {
     $stage = 'node-discovery'
     # ApplicationInfo.Path is the executable path on Windows PowerShell 5.1;
     # Source is not a reliable invocation path across PowerShell versions.
-    $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Path
+    $nodeCommand = Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $node = [string]$nodeCommand.Path
+    if (-not [IO.File]::Exists($node)) { throw 'Node executable missing' }
     $stage = 'node-version'
     $version = & $node --version
     if ($LASTEXITCODE -ne 0 -or $version -notmatch '^v24\.') { throw 'Node.js 24 required' }
