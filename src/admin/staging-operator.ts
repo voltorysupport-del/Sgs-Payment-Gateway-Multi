@@ -14,6 +14,7 @@ export interface KeyMetadata {
   id: string;
   name: string;
   revoked_at: Date | null;
+  permission: 'read_only' | 'read_write';
 }
 
 export async function verifyStagingTarget(client: PoolClient, expectedUser: string): Promise<void> {
@@ -66,12 +67,13 @@ export async function provisionStagingOperator(
       throw new ProvisioningError('operator');
     }
     const keys = await client.query<KeyMetadata>(
-      'SELECT id, name, revoked_at FROM operator_api_keys WHERE operator_id = $1 ORDER BY created_at, id FOR UPDATE',
+      'SELECT id, name, revoked_at, permission FROM operator_api_keys WHERE operator_id = $1 ORDER BY created_at, id FOR UPDATE',
       [operator.id],
     );
     let action: 'unchanged' | 'issued' | 'revoked' = 'unchanged';
     let keyId = request.keyId;
     let shouldIssue = false;
+    let permission: KeyMetadata['permission'] = 'read_write';
     const active = keys.rows.filter((key) => !key.revoked_at);
     if (request.operation === 'ensure') {
       if (active.length) keyId = active[0]!.id;
@@ -82,6 +84,7 @@ export async function provisionStagingOperator(
       const old = keys.rows.find((key) => key.id === request.keyId);
       if (!old) throw new ProvisioningError('key');
       if (request.operation === 'rotate') {
+        permission = old.permission;
         const previous = keys.rows.find((key) => key.name === `Staging rotation from ${old.id}`);
         if (previous) keyId = previous.id;
         else {
@@ -102,7 +105,7 @@ export async function provisionStagingOperator(
       const generated = generateOperatorApiKey();
       keyId = randomUUID();
       await client.query(
-        'INSERT INTO operator_api_keys (id, operator_id, name, key_hash) VALUES ($1, $2, $3, $4)',
+        'INSERT INTO operator_api_keys (id, operator_id, name, key_hash, permission) VALUES ($1, $2, $3, $4, $5)',
         [
           keyId,
           operator.id,
@@ -110,13 +113,14 @@ export async function provisionStagingOperator(
             ? `Staging rotation from ${request.keyId!}`
             : 'Staging initial API key',
           generated.keyHash,
+          permission,
         ],
       );
       await deliver({ operatorId: operator.id, keyId, apiKey: generated.apiKey });
       action = 'issued';
     }
     const metadata = await client.query<KeyMetadata>(
-      'SELECT id, name, revoked_at FROM operator_api_keys WHERE operator_id = $1 ORDER BY created_at, id',
+      'SELECT id, name, revoked_at, permission FROM operator_api_keys WHERE operator_id = $1 ORDER BY created_at, id',
       [operator.id],
     );
     await client.query('COMMIT');

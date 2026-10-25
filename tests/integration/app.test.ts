@@ -472,3 +472,141 @@ describe('simulated payment lifecycle', () => {
     expect((await request(productionApp).get('/health')).body.realPaymentsEnabled).toBe(false);
   });
 });
+
+describe('read-only operator payment history', () => {
+  async function readonlyKey() {
+    const reader = await createOperatorWithApiKey(
+      pool,
+      'Read-only fixture',
+      'reader_' + randomUUID(),
+      'Read-only',
+      'read_only',
+    );
+    otherOperatorIds.push(reader.operatorId);
+    // Reassign fixture ownership while retaining the actual helper-issued key.
+    await pool.query('UPDATE payments SET operator_id = $1 WHERE operator_id = $2', [
+      reader.operatorId,
+      operatorId,
+    ]);
+    apiKey = reader.apiKey;
+    keyId = reader.keyId;
+    const previous = operatorId;
+    operatorId = reader.operatorId;
+    otherOperatorIds.push(previous);
+  }
+  async function createFixture(currency = 'EUR') {
+    return request(app)
+      .post('/payments')
+      .auth(apiKey, { type: 'bearer' })
+      .set('Idempotency-Key', randomUUID())
+      .send({ amountMinor: 100, currency })
+      .expect(201);
+  }
+  it('preserves legacy access, lists and retrieves with read-only access, and denies both writes', async () => {
+    const created = await createFixture();
+    await readonlyKey();
+    const history = await request(app)
+      .get('/payments')
+      .auth(apiKey, { type: 'bearer' })
+      .expect(200);
+    expect((history.body.payments as { id: string }[]).map((p: { id: string }) => p.id)).toEqual([
+      created.body.id,
+    ]);
+    await request(app)
+      .get('/payments/' + created.body.id)
+      .auth(apiKey, { type: 'bearer' })
+      .expect(200);
+    await request(app)
+      .post('/payments')
+      .auth(apiKey, { type: 'bearer' })
+      .set('Idempotency-Key', randomUUID())
+      .send({ amountMinor: 100, currency: 'EUR' })
+      .expect(403);
+    await request(app)
+      .post('/payments/' + created.body.id + '/simulate')
+      .auth(apiKey, { type: 'bearer' })
+      .send({ outcome: 'succeeded' })
+      .expect(403);
+    const persisted = await pool.query('SELECT status FROM payments WHERE operator_id = $1', [
+      operatorId,
+    ]);
+    expect(persisted.rows).toEqual([{ status: 'pending' }]);
+  });
+  it('isolates histories and details and validates pagination and filters', async () => {
+    const created = await createFixture();
+    await createFixture('USD');
+    const other = await createOperatorWithApiKey(pool, 'Other history', 'other_' + randomUUID());
+    otherOperatorIds.push(other.operatorId);
+    await readonlyKey();
+    await pool.query(
+      "UPDATE payments SET created_at = '2026-01-01T00:00:00Z' WHERE operator_id = $1",
+      [operatorId],
+    );
+    const ordered = await pool.query(
+      'SELECT id FROM payments WHERE operator_id = $1 ORDER BY created_at DESC, id DESC',
+      [operatorId],
+    );
+    const page = await request(app)
+      .get('/payments?limit=1&offset=0')
+      .auth(apiKey, { type: 'bearer' })
+      .expect(200);
+    expect(page.body.payments).toHaveLength(1);
+    expect(page.body.pagination.hasMore).toBe(true);
+    const second = await request(app)
+      .get('/payments?limit=1&offset=1')
+      .auth(apiKey, { type: 'bearer' })
+      .expect(200);
+    expect(second.body.payments).toHaveLength(1);
+    expect(second.body.pagination.hasMore).toBe(false);
+    expect([page.body.payments[0].id, second.body.payments[0].id]).toEqual(
+      ordered.rows.map((row: { id: string }) => row.id),
+    );
+    expect(second.body.payments[0].id).not.toBe(page.body.payments[0].id);
+    const repeated = await request(app)
+      .get('/payments?limit=1&offset=0')
+      .auth(apiKey, { type: 'bearer' })
+      .expect(200);
+    expect(repeated.body).toEqual(page.body);
+    const filtered = await request(app)
+      .get('/payments?currency=EUR&status=pending')
+      .auth(apiKey, { type: 'bearer' })
+      .expect(200);
+    expect((filtered.body.payments as { id: string }[]).map((p: { id: string }) => p.id)).toEqual([
+      created.body.id,
+    ]);
+    const empty = await request(app)
+      .get('/payments')
+      .auth(other.apiKey, { type: 'bearer' })
+      .expect(200);
+    expect(empty.body.payments).toEqual([]);
+    await request(app)
+      .get('/payments/' + created.body.id)
+      .auth(other.apiKey, { type: 'bearer' })
+      .expect(404);
+    for (const query of [
+      'limit=101',
+      'limit=0',
+      'offset=10001',
+      'offset=-1',
+      'status=unknown',
+      'currency=eur',
+      'limit=1&limit=2',
+      'unknown=true',
+    ]) {
+      await request(app)
+        .get('/payments?' + query)
+        .auth(apiKey, { type: 'bearer' })
+        .expect(400);
+    }
+    await request(app).get('/payments').expect(401);
+    await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operatorId]);
+    await request(app).get('/payments').auth(apiKey, { type: 'bearer' }).expect(401);
+    await request(app)
+      .get('/payments/' + created.body.id)
+      .auth(apiKey, { type: 'bearer' })
+      .expect(401);
+    await pool.query("UPDATE operators SET status = 'active' WHERE id = $1", [operatorId]);
+    await revokeOperatorKey(pool, keyId, operatorId);
+    await request(app).get('/payments').auth(apiKey, { type: 'bearer' }).expect(401);
+  });
+});

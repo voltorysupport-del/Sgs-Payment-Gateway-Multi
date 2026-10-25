@@ -251,8 +251,8 @@ try {
     '--set=ON_ERROR_STOP=1',
     '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments); ROLLBACK;',
   ]);
-  if (remaining !== '2|0|0|0') {
-    throw new Error('Expected two migrations and no remaining integration fixtures.');
+  if (remaining !== '3|0|0|0') {
+    throw new Error('Expected three migrations and no remaining integration fixtures.');
   }
   const stagingRemaining = docker([
     'exec',
@@ -269,10 +269,10 @@ try {
     '--set=ON_ERROR_STOP=1',
     '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments); ROLLBACK;',
   ]);
-  if (stagingRemaining !== '2|0|0|0')
+  if (stagingRemaining !== '3|0|0|0')
     throw new Error('Staging CLI test fixtures were not cleaned up.');
   process.stdout.write(
-    'Confirmed in both disposable databases: 2 migrations applied; 0 operators, API keys, or payments remain.\n',
+    'Confirmed in both disposable databases: 3 migrations applied; 0 operators, API keys, or payments remain.\n',
   );
   if (check) await npm('build');
 } catch (error) {

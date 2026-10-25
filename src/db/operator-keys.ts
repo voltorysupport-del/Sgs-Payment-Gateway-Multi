@@ -24,6 +24,7 @@ export async function createOperatorWithApiKey(
   name: string,
   code: string,
   keyName = 'Initial API key',
+  permission: 'read_only' | 'read_write' = 'read_write',
 ): Promise<IssuedOperatorKey> {
   const operatorId = randomUUID();
   const keyId = randomUUID();
@@ -42,9 +43,9 @@ export async function createOperatorWithApiKey(
 
     await client.query(
       `INSERT INTO operator_api_keys
-         (id, operator_id, name, key_hash)
-       VALUES ($1, $2, $3, $4)`,
-      [keyId, operatorId, keyName, keyHash],
+         (id, operator_id, name, key_hash, permission)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [keyId, operatorId, keyName, keyHash, permission],
     );
 
     await client.query('COMMIT');
@@ -62,6 +63,7 @@ export async function createOperatorWithApiKey(
 export interface AuthenticatedOperator {
   id: string;
   code: string;
+  permission: 'read_only' | 'read_write';
 }
 
 export async function authenticateOperatorKey(
@@ -78,8 +80,9 @@ export async function authenticateOperatorKey(
     id: string;
     code: string;
     key_hash: string;
+    permission: AuthenticatedOperator['permission'];
   }>(
-    `SELECT o.id, o.code, k.key_hash
+    `SELECT o.id, o.code, k.key_hash, k.permission
      FROM operator_api_keys k
      JOIN operators o ON o.id = k.operator_id
      WHERE k.key_hash = $1
@@ -104,7 +107,7 @@ export async function authenticateOperatorKey(
     return null;
   }
 
-  return { id: row.id, code: row.code };
+  return { id: row.id, code: row.code, permission: row.permission };
 }
 
 export async function revokeOperatorKey(
