@@ -4,10 +4,12 @@ import type { AddressInfo } from 'node:net';
 import type { Pool } from 'pg';
 import request from 'supertest';
 import express from 'express';
-import { beforeAll, afterAll, beforeEach, afterEach, expect, it } from 'vitest';
+import { beforeAll, afterAll, beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { createApp } from '../../src/app.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { createOperatorWithApiKey, generateOperatorApiKey } from '../../src/db/operator-keys.js';
+import { withReadClient, ReadUnavailable } from '../../src/db/read-client.js';
+import { signReadRestriction } from '../../src/payments/internal-read.js';
 import { hashDashboardPassword } from '../../src/dashboard/passwords.js';
 import { captureLogger, testConfig } from '../helpers.js';
 import { openTestDatabase } from '../test-database.js';
@@ -17,6 +19,7 @@ let operator: string, otherOperator: string, reader: string, otherReader: string
 let readerId: string, user: string, otherUser: string, session: string, otherSession: string;
 let payment: string, otherPayment: string;
 let gatewayRequests = 0;
+let upstreamGate: ((req: http.IncomingMessage) => Promise<void>) | undefined;
 const origin = 'https://bff.example.invalid';
 const captured = captureLogger();
 function app(overrides: Record<string, string> = {}, connectionPool: Pool = pool) {
@@ -65,7 +68,15 @@ beforeAll(async () => {
   const gatewayApp = createApp({ pool, logger: captured.logger, config: testConfig() });
   gateway = http.createServer((req, res) => {
     gatewayRequests++;
-    gatewayApp(req, res);
+    void (async () => {
+      await upstreamGate?.(req);
+      if (!res.destroyed) gatewayApp(req, res);
+    })().catch(() => {
+      if (!res.destroyed) {
+        res.statusCode = 503;
+        res.end();
+      }
+    });
   });
   await new Promise<void>((resolve) => {
     gateway.listen(0, '127.0.0.1', resolve);
@@ -117,6 +128,7 @@ beforeEach(async () => {
   }
 });
 afterEach(async () => {
+  upstreamGate = undefined;
   for (const id of [user, otherUser])
     await pool.query('DELETE FROM dashboard_users WHERE id = $1', [id]);
   for (const op of [operator, otherOperator]) {
@@ -415,4 +427,327 @@ it('serves the BFF and its real internal payment API on the same listener withou
     });
     await single.end();
   }
+});
+function barrier() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+it.each(['ownership', 'permission', 'revoked'])(
+  'enforces the bound operator and read_only scope after a concurrent %s change',
+  async (mode) => {
+    for (const path of [
+      '/dashboard-api/payments',
+      '/dashboard-api/payments/' + otherPayment,
+      '/dashboard-api/status',
+    ]) {
+      await pool.query(
+        "UPDATE operator_api_keys SET operator_id = $2, permission = 'read_only', revoked_at = NULL WHERE id = $1",
+        [readerId, operator],
+      );
+      const entered = barrier(),
+        release = barrier();
+      upstreamGate = async () => {
+        entered.resolve();
+        await release.promise;
+      };
+      const pending = request(app())
+        .get(path)
+        .set('Cookie', session)
+        .then((r) => r);
+      try {
+        await entered.promise; // BFF key check completed; payment authentication has not run.
+        if (mode === 'ownership')
+          await pool.query('UPDATE operator_api_keys SET operator_id = $2 WHERE id = $1', [
+            readerId,
+            otherOperator,
+          ]);
+        if (mode === 'permission')
+          await pool.query("UPDATE operator_api_keys SET permission = 'read_write' WHERE id = $1", [
+            readerId,
+          ]);
+        if (mode === 'revoked')
+          await pool.query('UPDATE operator_api_keys SET revoked_at = NOW() WHERE id = $1', [
+            readerId,
+          ]);
+        release.resolve();
+        const res = await pending;
+        expect(res.status).toBe(503);
+        for (const secret of [reader, writer, otherReader, otherPayment]) {
+          expect(JSON.stringify(res.body).includes(secret)).toBe(false);
+          expect(captured.output().includes(reader)).toBe(false);
+        }
+      } finally {
+        release.resolve();
+        await pending;
+        upstreamGate = undefined;
+      }
+    }
+  },
+);
+it('rejects forged, partial or replayed restriction headers, which never substitute for a Bearer key', async () => {
+  await request(app())
+    .get('/dashboard-api/payments')
+    .set('Cookie', session)
+    .set('X-Vaultx-Read-Operator', otherOperator)
+    .expect(403);
+  await request(app())
+    .get('/payments')
+    .auth(reader, { type: 'bearer' })
+    .set('X-Vaultx-Read-Operator', operator)
+    .expect(403);
+  const restriction = signReadRestriction('/payments', reader, operator);
+  await request(app()).get('/payments').set(restriction).expect(403);
+  await request(app())
+    .get('/payments/' + payment)
+    .auth(reader, { type: 'bearer' })
+    .set(restriction)
+    .expect(403);
+  await request(app())
+    .post('/payments')
+    .auth(writer, { type: 'bearer' })
+    .set(restriction)
+    .send({ amountMinor: 100, currency: 'EUR' })
+    .expect(403);
+  await request(app())
+    .get('/payments')
+    .auth(reader, { type: 'bearer' })
+    .set(signReadRestriction('/payments', reader, otherOperator))
+    .expect(401);
+  await request(app())
+    .get('/payments')
+    .auth(writer, { type: 'bearer' })
+    .set(signReadRestriction('/payments', writer, operator))
+    .expect(401);
+  await request(app()).get('/payments').auth(reader, { type: 'bearer' }).expect(200);
+});
+it.each(['disabled', 'membership', 'suspended'])(
+  'documents one in-flight read and rejects subsequent requests after %s changes',
+  async (mode) => {
+    const entered = barrier(),
+      release = barrier();
+    upstreamGate = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    const active = app();
+    const pending = request(active)
+      .get('/dashboard-api/payments')
+      .set('Cookie', session)
+      .then((r) => r);
+    try {
+      await entered.promise;
+      if (mode === 'disabled')
+        await pool.query("UPDATE dashboard_users SET status = 'disabled' WHERE id = $1", [user]);
+      if (mode === 'membership')
+        await pool.query('UPDATE dashboard_memberships SET operator_id = $2 WHERE user_id = $1', [
+          user,
+          otherOperator,
+        ]);
+      if (mode === 'suspended')
+        await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operator]);
+      release.resolve();
+      const result = await pending;
+      expect(result.status).toBe(mode === 'suspended' ? 503 : 200);
+      if (result.status === 200)
+        expect((result.body as { payments: { id: string }[] }).payments.map((p) => p.id)).toEqual([
+          payment,
+        ]);
+      expect(JSON.stringify(result.body).includes(otherPayment)).toBe(false);
+      upstreamGate = undefined;
+      await request(active).get('/dashboard-api/payments').set('Cookie', session).expect(401);
+    } finally {
+      release.resolve();
+      await pending;
+      upstreamGate = undefined;
+    }
+  },
+);
+it(
+  'bounds locks and statement execution, rolls back failed reads and recovers',
+  { timeout: 10000 },
+  async () => {
+    const schema = 'bff_read_' + randomUUID().replaceAll('-', '');
+    await pool.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.fixture(id INTEGER)`);
+    const blocker = await pool.connect();
+    try {
+      await blocker.query(`BEGIN; LOCK TABLE ${schema}.fixture IN ACCESS EXCLUSIVE MODE`);
+      await expect(
+        withReadClient(pool, (client) => client.query(`SELECT * FROM ${schema}.fixture`)),
+      ).rejects.toBeInstanceOf(ReadUnavailable);
+      await blocker.query('ROLLBACK');
+      await expect(
+        withReadClient(pool, (client) => client.query('SELECT pg_sleep(2)')),
+      ).rejects.toBeInstanceOf(ReadUnavailable);
+      await expect(
+        withReadClient(pool, (client) => client.query('SELECT pg_sleep(2)'), { totalMs: 50 }),
+      ).rejects.toBeInstanceOf(ReadUnavailable);
+      const recovered = await withReadClient(pool, (client) =>
+        client.query<{ ready: number }>('SELECT 1 AS ready'),
+      );
+      expect(recovered.rows).toEqual([{ ready: 1 }]);
+    } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
+      await pool.query(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  },
+);
+it(
+  'bounds queued acquisitions during pool exhaustion and never executes late read work',
+  { timeout: 10000 },
+  async () => {
+    const single = await openTestDatabase();
+    single.options.max = 1;
+    const held = await single.connect();
+    let released = false;
+    const work = vi.fn(() => Promise.resolve(true));
+    try {
+      const pending = Array.from({ length: 4 }, () => withReadClient(single, work));
+      await expect(withReadClient(single, work)).rejects.toBeInstanceOf(ReadUnavailable);
+      const results = await Promise.allSettled(pending);
+      expect(results.every((r) => r.status === 'rejected')).toBe(true);
+      await expect(withReadClient(single, work)).rejects.toBeInstanceOf(ReadUnavailable);
+      expect(work).not.toHaveBeenCalled();
+      const unavailable = await request(app({}, single))
+        .get('/dashboard-api/payments')
+        .set('Cookie', session)
+        .expect(503);
+      expect(JSON.stringify(unavailable.body).includes(reader)).toBe(false);
+      held.release();
+      released = true;
+      await single.query('SELECT 1'); // Drains timed-out queued acquisitions; none may run work.
+      expect(work).not.toHaveBeenCalled();
+      expect(await withReadClient(single, work)).toBe(true);
+    } finally {
+      if (!released) held.release();
+      await single.end();
+    }
+  },
+);
+it('recovers after an upstream disconnect, releases admission, and rejects excess concurrent BFF work', async () => {
+  upstreamGate = (req) => {
+    req.socket.destroy();
+    return Promise.resolve();
+  };
+  const active = app();
+  await request(active).get('/dashboard-api/payments').set('Cookie', session).expect(502);
+  upstreamGate = undefined;
+  await request(active).get('/dashboard-api/payments').set('Cookie', session).expect(200);
+  const entered = barrier(),
+    release = barrier();
+  let count = 0;
+  upstreamGate = async () => {
+    count++;
+    if (count === 4) entered.resolve();
+    await release.promise;
+  };
+  const pending = Array.from({ length: 4 }, () =>
+    request(active)
+      .get('/dashboard-api/payments')
+      .set('Cookie', session)
+      .then((r) => r),
+  );
+  try {
+    await entered.promise;
+    await request(active).get('/dashboard-api/payments').set('Cookie', session).expect(503);
+    release.resolve();
+    expect((await Promise.all(pending)).every((r) => r.status === 200)).toBe(true);
+  } finally {
+    release.resolve();
+    await Promise.all(pending);
+    upstreamGate = undefined;
+  }
+  await request(active).get('/dashboard-api/payments').set('Cookie', session).expect(200);
+});
+it('aborts the upstream socket when the browser disconnects without starting new work', async () => {
+  const entered = barrier(),
+    release = barrier(),
+    closed = barrier();
+  upstreamGate = async (req) => {
+    req.socket.once('close', () => closed.resolve());
+    entered.resolve();
+    await release.promise;
+  };
+  const running = request(app()).get('/dashboard-api/payments').set('Cookie', session);
+  const pending = running.then((r) => r).catch(() => undefined);
+  try {
+    await entered.promise;
+    running.abort();
+    await closed.promise;
+  } finally {
+    release.resolve();
+    await pending;
+    upstreamGate = undefined;
+  }
+  await request(app()).get('/dashboard-api/status').set('Cookie', session).expect(200);
+});
+it.each(['wrong-id', 'pagination', 'provider'])(
+  'rejects invalid upstream %s payloads without leaking records or credentials',
+  async (mode) => {
+    const fake = http.createServer((_req, res) => {
+      const item = {
+        id: mode === 'wrong-id' ? otherPayment : payment,
+        amountMinor: 100,
+        currency: 'EUR',
+        status: 'pending',
+        provider: mode === 'provider' ? 'real-provider' : 'simulator',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        apiKey: reader,
+      };
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify(
+          mode === 'pagination'
+            ? {
+                payments: [item],
+                pagination: { limit: 99, offset: 0, hasMore: false },
+                credential: reader,
+              }
+            : item,
+        ),
+      );
+    });
+    await new Promise<void>((resolve) => {
+      fake.listen(0, '127.0.0.1', resolve);
+    });
+    try {
+      const bounded = app({ PORT: String((fake.address() as AddressInfo).port) });
+      const path =
+        mode === 'pagination'
+          ? '/dashboard-api/payments?limit=1'
+          : '/dashboard-api/payments/' + payment;
+      const res = await request(bounded).get(path).set('Cookie', session).expect(502);
+      for (const secret of [reader, otherPayment]) {
+        expect(JSON.stringify(res.body).includes(secret)).toBe(false);
+        expect(captured.output().includes(reader)).toBe(false);
+      }
+    } finally {
+      await new Promise<void>((resolve) => {
+        fake.close(() => resolve());
+      });
+    }
+  },
+);
+it('sanitizes DB failures and rejects PATCH/OPTIONS/TRACE without invoking upstream', async () => {
+  const broken = {
+    connect: () => Promise.reject(new Error('PRIVATE_DB_DETAIL')),
+    query: () => Promise.reject(new Error('PRIVATE_DB_DETAIL')),
+  } as unknown as Pool;
+  const res = await request(app({}, broken))
+    .get('/dashboard-api/payments')
+    .set('Cookie', session)
+    .expect(503);
+  expect(JSON.stringify(res.body).includes('PRIVATE_DB_DETAIL')).toBe(false);
+  expect(captured.output().includes('PRIVATE_DB_DETAIL')).toBe(false);
+  const before = gatewayRequests;
+  for (const method of ['patch', 'options', 'trace'] as const)
+    await request(app())[method]('/dashboard-api/payments').set('Cookie', session).expect(405);
+  expect(gatewayRequests).toBe(before);
+  for (const credential of [reader, writer, otherReader])
+    expect(captured.output().includes(credential)).toBe(false);
+  expect(captured.output().includes('\"amountMinor\"')).toBe(false);
 });

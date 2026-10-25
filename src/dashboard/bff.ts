@@ -1,3 +1,4 @@
+import { hasReadRestriction } from '../payments/internal-read.js';
 import { createHash } from 'node:crypto';
 import { Router, type ErrorRequestHandler } from 'express';
 import type { Pool } from 'pg';
@@ -36,6 +37,7 @@ const emptyQuery = z.object({}).strict();
 
 export function createDashboardBff(pool: Pool, config: Config): Router {
   const router = Router();
+  let active = 0;
   router.use(async (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method !== 'GET') {
@@ -43,6 +45,29 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
       sendError(res, 405, 'method_not_allowed', 'Only defined read operations are available.');
       return;
     }
+    if (hasReadRestriction(req.headers)) {
+      sendError(res, 403, 'forbidden', 'Request refused.');
+      return;
+    }
+    if (active >= 4) {
+      sendError(res, 503, 'unavailable', 'Dashboard reads unavailable.');
+      return;
+    }
+    active++;
+    let released = false;
+    const controller = new AbortController();
+    res.locals.readSignal = controller.signal;
+    const release = () => {
+      if (!released) {
+        released = true;
+        active--;
+      }
+    };
+    res.once('finish', release);
+    res.once('close', () => {
+      release();
+      if (!res.writableEnded) controller.abort();
+    });
     const raw = dashboardSessionToken(req);
     const identity = raw
       ? await touchDashboardSession(pool, createHash('sha256').update(raw).digest('hex'))
@@ -65,7 +90,9 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
       sendError(res, 403, 'forbidden', 'Dashboard access is not configured for this operator.');
       return;
     }
-    const key = await authenticateOperatorKey(pool, config.dashboardReadOnlyApiKey);
+    const key = await authenticateOperatorKey(pool, config.dashboardReadOnlyApiKey, {
+      bounded: true,
+    });
     if (!key || key.id !== identity.operator_id || key.permission !== 'read_only') {
       sendError(res, 503, 'unavailable', 'Dashboard reads unavailable.');
       return;
@@ -79,10 +106,16 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
       return;
     }
     const value = history.safeParse(
-      await readGateway(config.port, config.dashboardReadOnlyApiKey!, {
-        kind: 'history',
-        query: parsed.data,
-      }),
+      await readGateway(
+        config.port,
+        config.dashboardReadOnlyApiKey!,
+        {
+          kind: 'history',
+          query: parsed.data,
+        },
+        config.dashboardOperatorId!,
+        res.locals.readSignal as AbortSignal,
+      ),
     );
     if (
       !value.success ||
@@ -103,10 +136,16 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
       return;
     }
     const value = payment.safeParse(
-      await readGateway(config.port, config.dashboardReadOnlyApiKey!, {
-        kind: 'detail',
-        id: id.data,
-      }),
+      await readGateway(
+        config.port,
+        config.dashboardReadOnlyApiKey!,
+        {
+          kind: 'detail',
+          id: id.data,
+        },
+        config.dashboardOperatorId!,
+        res.locals.readSignal as AbortSignal,
+      ),
     );
     if (!value.success || value.data.id !== id.data) throw new GatewayReadError(502);
     res.json(value.data);
@@ -118,7 +157,13 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
     }
     if (
       !health.safeParse(
-        await readGateway(config.port, config.dashboardReadOnlyApiKey!, { kind: 'health' }),
+        await readGateway(
+          config.port,
+          config.dashboardReadOnlyApiKey!,
+          { kind: 'health' },
+          config.dashboardOperatorId!,
+          res.locals.readSignal as AbortSignal,
+        ),
       ).success
     )
       throw new GatewayReadError(502);
@@ -135,6 +180,7 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
     sendError(res, 404, 'not_found', 'Resource not found.');
   });
   const errors: ErrorRequestHandler = (error: unknown, req, res, _next) => {
+    if (res.destroyed || res.headersSent) return;
     const status = error instanceof GatewayReadError ? error.status : 503;
     req.log.warn({ status }, 'Dashboard read request failed');
     sendError(

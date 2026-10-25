@@ -1,3 +1,5 @@
+import { readRestriction } from './payments/internal-read.js';
+import { authenticateOperatorKey } from './db/operator-keys.js';
 import { randomUUID } from 'node:crypto';
 import express, { type ErrorRequestHandler, type Express } from 'express';
 import helmet from 'helmet';
@@ -62,7 +64,22 @@ export function createApp({ config, logger, pool }: AppDependencies): Express {
 
   app.use(express.json({ limit: '100kb' }));
 
-  app.get('/health', (_req, res) => {
+  app.get('/health', async (req, res) => {
+    const header = req.header('authorization');
+    const key = header?.startsWith('Bearer ') ? header.slice(7) : '';
+    try {
+      const restriction = readRestriction(req, key);
+      if (
+        restriction &&
+        !(await authenticateOperatorKey(pool, key, { restriction, bounded: true }))
+      ) {
+        sendError(res, 401, 'unauthorized', 'Authentication required.');
+        return;
+      }
+    } catch {
+      sendError(res, 503, 'unavailable', 'Health read unavailable.');
+      return;
+    }
     res.json({
       status: 'ok',
       service: 'vaultx-pay',

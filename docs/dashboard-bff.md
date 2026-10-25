@@ -18,6 +18,25 @@ operator must match the session membership; there is no browser-selected tenant.
 The server key is authenticated against PostgreSQL on every request and must
 belong to that operator with exactly read_only permission. Revoked, unknown,
 mismatched and write-enabled keys fail closed. No credential is cached as valid.
+
+The internal request carries a process-signed restriction binding its exact GET
+path, Bearer-key hash, expected operator, read_only permission and ten-second
+expiry. The payment API verifies the proof and includes operator/permission
+constraints in the same SQL authentication lookup that supplies the operator ID
+used to select payments. Moving a key or changing its scope between the BFF check
+and API lookup therefore denies the read. A valid proof never replaces a valid,
+active Bearer key. Browser-supplied reserved restriction headers are rejected;
+no incoming headers are reused for signing. Partial, altered, expired or
+method/path/key-mismatched proofs fail closed. Signed health reads enforce the
+same credential restrictions; ordinary public /health remains public.
+
+No ownership-immutability migration is necessary to close this race: payment SQL
+uses the operator captured by the constrained authentication lookup, even if
+privileged maintenance changes ownership afterward. Rotation/schema behavior
+is unchanged. The process-local signing secret is generated in memory, never
+configured, persisted or exposed; it is not an operator credential. Multiple
+Node workers with independent secrets would fail closed and are unsupported
+without a separately reviewed shared capability mechanism.
 As with existing authentication, in-flight requests are not retroactively
 canceled; revocation takes effect at subsequent authentication boundaries.
 
@@ -48,7 +67,7 @@ proxy configuration. Redirects are never followed and requests never retry.
 This keeps HTTP within the same trusted container and avoids Render DNS, public
 TLS and cold-start loops. It does not weaken browser HTTPS or PostgreSQL TLS.
 No database connection/transaction is held while waiting for the internal HTTP
-response. This avoids a nested-request pool deadlock. The deployment must retain
+response. This is tested with a one-connection pool. This avoids a nested-request pool deadlock. The deployment must retain
 this single-service topology; a split service or untrusted local sidecar needs a
 new transport review. Failure to reach loopback fails closed, with no fallback.
 
@@ -103,3 +122,48 @@ inputs, forbidden methods, unchanged Bearer behavior and output privacy.
 Transport unit tests cover the fixed destination/headers, both timeout paths,
 redirects, response-size bounds, invalid JSON/content types, aborts and errors.
 No real credentials or database settings are used by tests or CI.
+
+## Availability and cancellation boundaries
+
+The BFF admits at most four active requests per router with no waiting queue.
+A shared per-pool read gate admits at most four DB leases, including queued
+acquisitions. Acquisition waits are limited to 750 ms; timed-out acquisitions
+retain their admission slot until settled, and late clients are released without
+executing SQL. This prevents accumulating replacement queue entries. Runtime
+pool size remains ten; payment-write authentication and transactions retain
+existing behavior and are not subject to this read gate.
+
+Key authentication for GET/HEAD, payment list/detail and internal health use
+read-only transactions with 1500 ms statement timeout, 500 ms lock timeout and
+2500 ms total lease deadline. Total deadline destroys the client on a stalled
+network/driver, rather than returning an uncertain client to the pool. Dashboard
+session activity is deliberately writable authentication metadata: its existing
+5000/2000 ms SQL/lock deadlines remain, with a 6000 ms total lease deadline.
+Local settings reset on commit/rollback; uncertain connections are discarded.
+Overload and DB failures return sanitized 503 responses. No global migration,
+write timeout or persistent DB setting is changed.
+
+Browser disconnect aborts the internal HTTP request; BFF admission is released.
+HTTP timeout/disconnect does not issue PostgreSQL CancelRequest. Already-running
+SQL may finish until server statement timeout or connection closure; completed
+work cannot be reversed. A session-activity COMMIT already sent may persist even
+if its acknowledgement is lost. Pure payment-read transactions never change
+payment records. No automatic retry occurs. Queued DB acquisitions cannot be
+removed individually through pg's public promise API; their retained bounded
+slots are released when acquisition resolves/rejects. These controls limit
+per-process pressure, not distributed denial of service or all legacy write
+pressure on the pool.
+
+A user disabled or reassigned after initial BFF authentication may receive one
+already-authorized response for the original operator; tests pin this boundary.
+The next request is rejected, and data from the new operator is never substituted.
+Operator suspension or key revocation before upstream authentication denies the
+in-flight read because that boundary rechecks both. No lock is held across HTTP.
+
+Deterministic test barriers pause between BFF validation and actual upstream
+payment authentication for ownership/scope/revocation changes. Additional tests
+cover in-flight user/membership/suspension, forged restrictions, real lock and
+statement cancellation, total-deadline connection disposal, exhausted pools and
+late acquisitions, disconnect recovery, admission overflow, malformed output,
+PATCH/OPTIONS/TRACE rejection, sanitized DB errors and secret-free logs. HTTPS
+browser, staging TLS/grants and administrative enablement prerequisites remain.

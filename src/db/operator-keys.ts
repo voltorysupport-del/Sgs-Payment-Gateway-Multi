@@ -1,5 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { Pool } from 'pg';
+import { withReadClient } from './read-client.js';
+import type { ReadRestriction } from '../payments/internal-read.js';
+import type { Pool, PoolClient } from 'pg';
 
 const API_KEY_PREFIX = 'vxp_';
 
@@ -69,6 +71,7 @@ export interface AuthenticatedOperator {
 export async function authenticateOperatorKey(
   pool: Pool,
   apiKey: string,
+  policy?: { restriction?: ReadRestriction; bounded?: boolean },
 ): Promise<AuthenticatedOperator | null> {
   if (!/^vxp_[a-f0-9]{64}$/.test(apiKey)) {
     return null;
@@ -76,22 +79,30 @@ export async function authenticateOperatorKey(
 
   const suppliedHash = hashApiKey(apiKey);
 
-  const result = await pool.query<{
-    id: string;
-    code: string;
-    key_hash: string;
-    permission: AuthenticatedOperator['permission'];
-  }>(
-    `SELECT o.id, o.code, k.key_hash, k.permission
+  const query = (client: Pool | PoolClient) =>
+    client.query<{
+      id: string;
+      code: string;
+      key_hash: string;
+      permission: AuthenticatedOperator['permission'];
+    }>(
+      `SELECT o.id, o.code, k.key_hash, k.permission
      FROM operator_api_keys k
      JOIN operators o ON o.id = k.operator_id
      WHERE k.key_hash = $1
        AND k.revoked_at IS NULL
        AND o.status = 'active'
+       AND ($2::uuid IS NULL OR o.id = $2)
+       AND ($3::text IS NULL OR k.permission = $3)
      LIMIT 1`,
-    [suppliedHash],
-  );
+      [
+        suppliedHash,
+        policy?.restriction?.operatorId ?? null,
+        policy?.restriction?.permission ?? null,
+      ],
+    );
 
+  const result = policy?.bounded ? await withReadClient(pool, query) : await query(pool);
   const row = result.rows[0];
 
   if (!row) {

@@ -1,3 +1,4 @@
+import { signReadRestriction } from '../payments/internal-read.js';
 import http from 'node:http';
 import { z } from 'zod';
 import { paymentHistoryQuerySchema } from '../payments/history-contract.js';
@@ -45,8 +46,12 @@ export async function readGateway(
   port: number,
   apiKey: string,
   read: GatewayRead,
+  expectedOperatorId: string,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const path = readPath(read);
+  if (signal?.aborted) throw new GatewayReadError(503);
+  const restrictions = signReadRestriction(path, apiKey, expectedOperatorId);
   const agent = new http.Agent({ keepAlive: false });
   try {
     return await new Promise((resolve, reject) => {
@@ -66,10 +71,12 @@ export async function readGateway(
           path,
           method: 'GET',
           agent,
-          headers:
-            read.kind === 'health'
-              ? { Accept: 'application/json' }
-              : { Accept: 'application/json', Authorization: 'Bearer ' + apiKey },
+          headers: {
+            Accept: 'application/json',
+            Authorization: 'Bearer ' + apiKey,
+            ...restrictions,
+          },
+          signal,
         },
         (res) => {
           // No redirects, upstream error messages, cookies or headers are returned.

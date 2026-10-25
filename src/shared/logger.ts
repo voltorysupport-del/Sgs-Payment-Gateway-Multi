@@ -17,6 +17,7 @@ export const REDACT_PATHS: readonly string[] = [
   'req.headers.authorization',
   'req.headers.cookie',
   'req.headers["x-api-key"]',
+  'req.headers["x-vaultx-read-proof"]',
   'res.headers["set-cookie"]',
   // Common secret field names, at the top level and one level deep
   'password',

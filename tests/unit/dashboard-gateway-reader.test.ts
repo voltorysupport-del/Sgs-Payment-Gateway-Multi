@@ -1,7 +1,11 @@
 import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { afterEach, expect, it, vi } from 'vitest';
-import { readGateway } from '../../src/dashboard/gateway-reader.js';
+import { readGateway as gateway } from '../../src/dashboard/gateway-reader.js';
+import type { GatewayRead } from '../../src/dashboard/gateway-reader.js';
+const expectedOperator = '00000000-0000-4000-8000-000000000001';
+const readGateway = (port: number, key: string, read: GatewayRead) =>
+  gateway(port, key, read, expectedOperator);
 import { ConfigError } from '../../src/config/index.js';
 import { testConfig } from '../helpers.js';
 
@@ -52,7 +56,12 @@ it('fixes destination/method and constructs only normalized read paths and serve
       port: 12345,
       method: 'GET',
       path: '/payments?limit=25&offset=0&status=pending&currency=EUR',
-      headers: { Accept: 'application/json', Authorization: 'Bearer SYNTHETIC-NOT-A-REAL-KEY' },
+      headers: expect.objectContaining({
+        Accept: 'application/json',
+        Authorization: 'Bearer SYNTHETIC-NOT-A-REAL-KEY',
+        'x-vaultx-read-operator': expectedOperator,
+        'x-vaultx-read-permission': 'read_only',
+      }),
     }),
     expect.any(Function),
   );
