@@ -1,0 +1,66 @@
+name: Single-use staging operator issuance package
+
+on:
+  pull_request:
+    branches: ['feature/step-1-project-setup']
+    paths:
+      - 'tools/staging-operator-issuance/**'
+      - '.github/workflows/staging-operator-issuance.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-package:
+    name: Pinned CLI safeguards, native DPAPI and single-use issuance ZIP
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: ''
+      TEST_DATABASE_URL: ''
+      TEST_DATABASE_TOKEN: ''
+      LIVE_MODE_ENABLED: 'false'
+      ALLOWED_PROVIDERS: simulator
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked build dependencies without lifecycle scripts
+        run: npm ci --include=dev --ignore-scripts
+      - name: Build pinned issuance package outside checkout
+        shell: pwsh
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP 'VaultX Single Use Issuance & Offline'
+          "ISSUANCE_PACKAGE=$package" >> $env:GITHUB_ENV
+          node tools/staging-operator-issuance/build-package.js "$package"
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned build failed' }
+      - name: Credential-free single-use controller, identity and native DPAPI tests
+        run: node tools/staging-operator-issuance/validate-package.js "$env:ISSUANCE_PACKAGE"
+      - name: Publish single-use issuance ZIP
+        id: artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VaultX-Staging-Operator-Issuance-SINGLE-USE
+          path: '${{ env.ISSUANCE_PACKAGE }}/'
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+      - name: Download actual uploaded artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: VaultX-Staging-Operator-Issuance-SINGLE-USE
+          path: '${{ runner.temp }}/VaultX Issuance Downloaded & Verified'
+      - name: Verify downloaded contents and repeat native validation
+        shell: pwsh
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP 'VaultX Issuance Downloaded & Verified'
+          foreach ($name in @('Start-Issuance.cmd','launcher.js','status-check.js','issuer.js','worker.js','dpapi-test.js','README.txt','SHA256SUMS.json','PROVENANCE.json')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $package $name) -PathType Leaf)) { throw 'Incomplete issuance artifact' }
+          }
+          node tools/staging-operator-issuance/validate-package.js "$package"
+          if ($LASTEXITCODE -ne 0) { throw 'Downloaded artifact validation failed' }
+          '[Download single-use issuance ZIP](${{ steps.artifact.outputs.artifact-url }})' >> $env:GITHUB_STEP_SUMMARY
