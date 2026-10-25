@@ -16,7 +16,8 @@ assert.ok(
 fs.mkdirSync(destination, { recursive: true });
 for (const name of [
   'preflight.js',
-  'Run-Preflight.ps1',
+  'launcher.js',
+  'console-input.js',
   'Start-Preflight.cmd',
   'README.txt',
   'package.json',

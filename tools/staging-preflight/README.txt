@@ -1,61 +1,70 @@
-VaultX Pay READ-ONLY staging preflight - schema basis 245752b
+VaultX Pay READ-ONLY staging preflight - Node.js launcher
+Schema and safety basis: merged commit 245752b.
 
-This package is separate from the application repository. It requires only Node.js
-24 already installed on Windows. No Git, PostgreSQL client, npm install, Docker,
-repository location, SQL authoring, or code editing is needed.
+Requires Node.js 24 already approved and installed on Windows. No PowerShell script,
+Git, SQL editing, npm install, repository checkout, PostgreSQL client or Docker is
+needed. No .ps1 file is included and no PowerShell execution policy is changed.
 
-After your separate approval for the actual Render check: extract the complete ZIP to a
-private folder and double-click Start-Preflight.cmd. Do not run from inside the ZIP.
-The program asks for explicit READONLY consent, the independently verified full
-external staging hostname and PostgreSQL authenticated login, then the private URL
-in a hidden prompt. Never send the URL to chat or include it in command arguments.
-The URL is passed to Node over a private stdin pipe, not the environment or a file.
+After separate approval for the actual Render check: extract the COMPLETE ZIP into
+a private folder and double-click Start-Preflight.cmd. Do not run from inside the
+ZIP. All replies are hidden (no characters or asterisks), including consent, host
+and login, so accidentally pasting a URL into a wrong prompt does not display it.
+Type READONLY at the consent prompt, then enter the independently verified full
+EXTERNAL hostname and authenticated PostgreSQL login. Paste the private external
+staging URL only at the final prompt. Never send it to chat. Enter submits;
+Backspace edits; Ctrl+C cancels. Unsupported control/escape keys stop the run.
 
-Do not use a shared/recorded/transcribed/debugged session. Never print credentials.
-The package validates its file hashes and refuses inherited Node debugging/loader
-options or NODE_TLS_REJECT_UNAUTHORIZED=0. Hashes detect accidental changes, not a
-malicious distributor. Obtain the ZIP through the approved authenticated GitHub
-artifact location and compare its published checksum when required by policy.
+The launcher uses Node's raw console mode to disable echo; it restores the previous
+mode on completion, cancellation, EOF and input errors. Redirected/noninteractive
+credential input is refused. Use a normal authorized Windows terminal, not an IDE
+output pane, shared/recorded/debugged session or terminal transcript. The private
+URL travels over a child-process stdin pipe, never argv, environment, a saved URL
+file, terminal output or command history. Credentials necessarily exist briefly
+in process memory; this does not protect against a compromised administrator,
+machine, clipboard monitor, process dump or external keyboard recording.
 
-Windows PowerShell 5.1 and PowerShell 7-compatible language constructs are used.
-Start-Preflight.cmd invokes Windows PowerShell 5.1. No execution policy is changed,
-no Unblock-File is run, and TLS verification is never disabled. If company policy
-blocks the unsigned launcher, STOP and obtain the organization's approved signing
-or execution method. Do not bypass policy or run as administrator to work around it.
+Start-Preflight.cmd refuses Node preload/debug/unsafe TLS/native-driver variables
+BEFORE Node starts, without expanding or printing their values. Node rechecks its
+runtime and file integrity before reading any input. The package rejects missing,
+modified or extra files. SHA256SUMS.json detects accidental changes, not a malicious
+distributor replacing both code and hashes. Use the authenticated GitHub artifact
+and its published ZIP digest. Vendored pg dependencies and licenses are included.
 
-The only database SQL consists of SELECT, BEGIN READ ONLY and ROLLBACK. A read-only
-session default protects queries as well. No application entry point, migrations,
-provisioning functions, real provider, or arbitrary user-provided SQL is executed.
-PostgreSQL enforces no application/schema writes in the transaction. The database
-account may retain write privileges for future provisioning: this tool inspects
-those privileges but does not exercise them or make the account read-only globally.
-No marker changes, operator or key creation, trial writes, or metadata repairs occur.
-Ordinary database connection/audit/statistics activity is not disabled.
+This does not override enterprise security controls. Node and CMD must themselves
+be permitted by your organization's policy. If application control/SmartScreen or
+endpoint security blocks the package, STOP and ask your authorized IT administrator
+for an approved method. Do not unblock files, change execution policy, disable
+protection, or run as administrator to work around it.
 
-Remote TLS requires verified certificate chain and hostname, TLS 1.2+, and SNI.
-There is no plaintext/local test mode in the distributed checker. Numeric IP
-substitution, Render short internal names, wrong target fields, and insecure URL
-SSL options are rejected. Only vaultx_pay_staging and PostgreSQL 17 qualify.
+Database SQL is unchanged: SELECT, BEGIN READ ONLY and ROLLBACK only. Read-only
+session defaults, timeouts, parameterized queries and a read-only transaction
+remain enforced. No application startup, migrations, provisioning functions, real
+provider, arbitrary SQL or trial writes execute. No operator or API key is created;
+no marker, schema, records or permissions are changed. Normal connection/audit/
+statistics activity is not disabled. The account may have write privileges, but
+this checker only inspects those privileges and never exercises them.
 
-PASS means the read-only identity, marker, schema existence, migration ledger and
-catalog privilege checks passed. It does NOT authorize provisioning. STOP means do
-not provision or repair anything automatically. Constraints/triggers, concurrent
-changes and actual future writes cannot be fully proven by read-only inspection.
+Remote TLS requires verified certificate chain and hostname, TLS 1.2+ and SNI.
+There is no plaintext mode. Internal short names, numeric IP substitutions, wrong
+identity fields and insecure SSL URL options are refused. Exact database name
+vaultx_pay_staging, authenticated session_user, PostgreSQL 17, staging marker,
+migration ledger, required tables/columns and catalog privileges are checked.
 
-Package validation workflow:
-- Offline configuration checks reject missing consent, wrong identity fields, wrong
-  database, internal/IP endpoints, and insecure SSL options without opening sockets.
-- Seven isolated query-driver simulations cover readiness and failure conditions,
-  with SQL allowlist, TLS, rollback and secret-output assertions. No DB records exist.
-- Windows PowerShell 5.1 and PowerShell 7 execute the actual launcher in ValidateOnly
-  mode, including a private UTF-8 input pipe and paths containing spaces/ampersands.
-- Tampered/missing files and unsafe Node options must fail closed.
-- The GitHub run is the source of the actual validation result; no Render database
-  or operator/key provisioning is part of this workflow.
+PASS covers these read-only prerequisites, not permission to provision. STOP means
+do not provision or automatically repair anything. Read-only catalog inspection
+cannot prove every trigger/constraint, concurrent change or future successful write.
 
-The -ValidateOnly launcher switch runs credential-free local checks only. It never
-loads the PostgreSQL driver or opens a database connection. Runtime dependencies
-and their license files are bundled from the project's locked dependency versions.
-The package SHA256SUMS.json detects accidental changes; authenticated GitHub access
-provides distribution provenance. The artifact expires after 30 days. Never use an
-untrusted replacement bundle or weaken an organization's script execution policy.
+CI uses synthetic non-credentials and disposable temporary files only, without any
+network/database connection. It tests the Node launcher and pipe on Windows,
+hidden-console input behavior with simulated TTY events, cancellation/echo/UTF-8,
+fail-closed integrity/runtime/TTY controls, and unchanged SQL/TLS rules. It uploads,
+downloads and revalidates the actual artifact. Simulated TTY tests verify the input
+logic; they do not emulate every Windows Terminal/endpoint-security configuration.
+An extra Windows CI check runs the Node launcher under Restricted PowerShell policy
+using an inline host command, without executing any PowerShell script file.
+
+Credential-free validation can be run with: node launcher.js --validate-only
+That mode verifies integrity and the private UTF-8 pipe, but never loads pg or
+opens a socket. It cannot perform the Render check or consume private credentials.
+The GitHub artifact expires after 30 days. Actual Render execution still requires
+your separate approval; publishing/testing this package never connects to Render.

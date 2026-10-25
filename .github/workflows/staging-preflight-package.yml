@@ -37,12 +37,12 @@ jobs:
           "PREFLIGHT_PACKAGE=$package" >> $env:GITHUB_ENV
       - name: Build standalone package without application startup
         run: node tools/staging-preflight/build-package.js "$env:PREFLIGHT_PACKAGE"
-      - name: Native PowerShell launchers, fail-closed paths and synthetic query tests
+      - name: Native Node launcher, hidden input, fail-closed paths and synthetic query tests
         run: node tools/staging-preflight/validate-package.js "$env:PREFLIGHT_PACKAGE"
       - name: Verify ZIP input contents and digest manifest
         shell: pwsh
         run: |
-          foreach ($name in @('Start-Preflight.cmd', 'Run-Preflight.ps1', 'preflight.js', 'README.txt', 'SHA256SUMS.json', 'PROVENANCE.json', 'node_modules/pg/package.json')) {
+          foreach ($name in @('Start-Preflight.cmd', 'launcher.js', 'console-input.js', 'preflight.js', 'README.txt', 'SHA256SUMS.json', 'PROVENANCE.json', 'node_modules/pg/package.json')) {
             if (-not (Test-Path -LiteralPath (Join-Path $env:PREFLIGHT_PACKAGE $name) -PathType Leaf)) { throw 'Incomplete preflight package' }
           }
           $manifest = Get-Content -LiteralPath (Join-Path $env:PREFLIGHT_PACKAGE 'SHA256SUMS.json') -Raw | ConvertFrom-Json
@@ -68,7 +68,7 @@ jobs:
         shell: pwsh
         run: |
           $download = Join-Path $env:RUNNER_TEMP 'VaultX Downloaded & Verified'
-          foreach ($name in @('Start-Preflight.cmd', 'Run-Preflight.ps1', 'preflight.js', 'README.txt', 'SHA256SUMS.json', 'PROVENANCE.json', 'package.json', 'node_modules/pg/package.json')) {
+          foreach ($name in @('Start-Preflight.cmd', 'launcher.js', 'console-input.js', 'preflight.js', 'README.txt', 'SHA256SUMS.json', 'PROVENANCE.json', 'package.json', 'node_modules/pg/package.json')) {
             if (-not (Test-Path -LiteralPath (Join-Path $download $name) -PathType Leaf)) { throw 'Downloaded artifact is incomplete' }
           }
           node tools/staging-preflight/validate-package.js "$download"
