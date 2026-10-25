@@ -749,5 +749,5 @@ it('sanitizes DB failures and rejects PATCH/OPTIONS/TRACE without invoking upstr
   expect(gatewayRequests).toBe(before);
   for (const credential of [reader, writer, otherReader])
     expect(captured.output().includes(credential)).toBe(false);
-  expect(captured.output().includes('\"amountMinor\"')).toBe(false);
+  expect(captured.output().includes('"amountMinor"')).toBe(false);
 });
