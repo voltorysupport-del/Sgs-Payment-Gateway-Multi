@@ -9,6 +9,7 @@
  * because values such as DATABASE_URL contain passwords.
  */
 import { z } from 'zod';
+import { isIP } from 'node:net';
 
 /** Payment providers this version of VaultX Pay is allowed to use. */
 export const SUPPORTED_PROVIDERS = ['simulator'] as const;
@@ -30,6 +31,42 @@ const booleanFlag = (name: string) =>
 
 const envSchema = z
   .object({
+    DASHBOARD_ENABLED: booleanFlag('DASHBOARD_ENABLED'),
+    DASHBOARD_PUBLIC_ORIGIN: z
+      .string()
+      .optional()
+      .refine(
+        (value) => {
+          if (value === undefined) return true;
+          try {
+            const u = new URL(value);
+            return u.protocol === 'https:' && u.origin === value && !u.username && !u.password;
+          } catch {
+            return false;
+          }
+        },
+        { message: 'DASHBOARD_PUBLIC_ORIGIN must be an exact HTTPS origin' },
+      ),
+    DASHBOARD_TRUSTED_PROXIES: z
+      .string()
+      .default('')
+      .transform((value) => (value ? value.split(',').map((v) => v.trim()) : []))
+      .refine(
+        (values) =>
+          values.every((value) => {
+            const [address, mask, extra] = value.split('/');
+            const family = isIP(address ?? '');
+            return (
+              !extra &&
+              family !== 0 &&
+              (mask === undefined ||
+                (/^[0-9]+$/.test(mask) &&
+                  Number(mask) > 0 &&
+                  Number(mask) <= (family === 4 ? 32 : 128)))
+            );
+          }),
+        { message: 'DASHBOARD_TRUSTED_PROXIES must contain explicit IPs or CIDRs (no catch-all)' },
+      ),
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
     PORT: z.coerce.number().int().min(1).max(65535).default(3000),
@@ -77,6 +114,12 @@ const envSchema = z
     SIMULATOR_CONTROLS_ENABLED: booleanFlag('SIMULATOR_CONTROLS_ENABLED'),
   })
   .superRefine((env, ctx) => {
+    if (env.DASHBOARD_ENABLED && !env.DASHBOARD_PUBLIC_ORIGIN)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['DASHBOARD_PUBLIC_ORIGIN'],
+        message: 'Required when dashboard is enabled',
+      });
     if (env.NODE_ENV === 'production' && env.SIMULATOR_CONTROLS_ENABLED) {
       ctx.addIssue({
         code: 'custom',
@@ -87,6 +130,9 @@ const envSchema = z
   });
 
 export interface Config {
+  readonly dashboardEnabled: boolean;
+  readonly dashboardPublicOrigin: string | undefined;
+  readonly dashboardTrustedProxies: readonly string[];
   readonly nodeEnv: 'development' | 'test' | 'production';
   readonly port: number;
   readonly logLevel: LogLevel;
@@ -129,6 +175,9 @@ export function loadConfig(env: EnvSource = process.env): Config {
   const parsed = result.data;
 
   return Object.freeze({
+    dashboardEnabled: parsed.DASHBOARD_ENABLED,
+    dashboardPublicOrigin: parsed.DASHBOARD_PUBLIC_ORIGIN,
+    dashboardTrustedProxies: Object.freeze(parsed.DASHBOARD_TRUSTED_PROXIES),
     nodeEnv: parsed.NODE_ENV,
     port: parsed.PORT,
     logLevel: parsed.LOG_LEVEL,

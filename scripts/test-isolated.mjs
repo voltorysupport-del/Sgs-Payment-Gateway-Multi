@@ -249,10 +249,10 @@ try {
     '--username=vaultx_test',
     '--dbname=vaultx_pay_test',
     '--set=ON_ERROR_STOP=1',
-    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments); ROLLBACK;',
+    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments), (SELECT count(*) FROM dashboard_users), (SELECT count(*) FROM dashboard_memberships), (SELECT count(*) FROM dashboard_sessions), (SELECT count(*) FROM dashboard_login_limits); ROLLBACK;',
   ]);
-  if (remaining !== '3|0|0|0') {
-    throw new Error('Expected three migrations and no remaining integration fixtures.');
+  if (remaining !== '4|0|0|0|0|0|0|0') {
+    throw new Error('Expected four migrations and no remaining integration fixtures.');
   }
   const stagingRemaining = docker([
     'exec',
@@ -267,12 +267,12 @@ try {
     '--username=vaultx_test',
     '--dbname=vaultx_pay_staging',
     '--set=ON_ERROR_STOP=1',
-    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments); ROLLBACK;',
+    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments), (SELECT count(*) FROM dashboard_users), (SELECT count(*) FROM dashboard_memberships), (SELECT count(*) FROM dashboard_sessions), (SELECT count(*) FROM dashboard_login_limits); ROLLBACK;',
   ]);
-  if (stagingRemaining !== '3|0|0|0')
+  if (stagingRemaining !== '4|0|0|0|0|0|0|0')
     throw new Error('Staging CLI test fixtures were not cleaned up.');
   process.stdout.write(
-    'Confirmed in both disposable databases: 3 migrations applied; 0 operators, API keys, or payments remain.\n',
+    'Confirmed in both disposable databases: 4 migrations applied; 0 operators, API keys, payments, dashboard users, memberships, sessions or limit buckets remain.\n',
   );
   if (check) await npm('build');
 } catch (error) {
