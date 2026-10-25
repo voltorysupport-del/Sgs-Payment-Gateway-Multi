@@ -7,6 +7,7 @@ import { pinoHttp } from 'pino-http';
 import type { Pool } from 'pg';
 import type { Config } from './config/index.js';
 import { assertRealPaymentsDisabled } from './config/safety.js';
+import { createDashboardFrontend } from './dashboard/frontend.js';
 import { createDashboardBff } from './dashboard/bff.js';
 import { createDashboardAuthRouter } from './dashboard/routes.js';
 import { createPaymentsRouter } from './payments/routes.js';
@@ -61,6 +62,9 @@ export function createApp({ config, logger, pool }: AppDependencies): Express {
 
   if (config.dashboardEnabled && config.dashboardBffEnabled)
     app.use('/dashboard-api', createDashboardBff(pool, config));
+
+  if (config.dashboardEnabled && config.dashboardBffEnabled)
+    app.use('/dashboard', createDashboardFrontend());
 
   app.use(express.json({ limit: '100kb' }));
 

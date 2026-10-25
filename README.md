@@ -102,3 +102,7 @@ docs/                 decisions and design notes
 ## Branch workflow
 
 Work on a feature branch, open a pull request into `main`, and merge only when CI is green.
+
+## Read-only operator dashboard (disabled by default)
+
+The React dashboard is built with the Express service and served at `/dashboard/` only when both dashboard feature gates are explicitly enabled. See [dashboard setup, security controls, tests and later deployment prerequisites](docs/dashboard-frontend.md). No frontend credentials or real payment controls are included.

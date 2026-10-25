@@ -67,13 +67,24 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
+      - name: Install Chromium for local HTTPS browser tests
+        run: npx playwright install --with-deps chromium
+
       - name: Run tests
         env:
+          VAULTX_BROWSER_TESTS: 'true'
           VAULTX_CI_POSTGRES_ID: ${{ job.services.postgres.id }}
         run: npm run test:isolated -- --ci-service
 
       - name: Build
         run: npm run build
+
+      - name: Upload synthetic dashboard screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-synthetic-screenshots
+          path: test-results/dashboard/*.png
+          if-no-files-found: error
 
   secret-scan:
     name: Secret scan (gitleaks)
