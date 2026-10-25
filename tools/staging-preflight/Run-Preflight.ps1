@@ -10,10 +10,14 @@ $script:inputBytes = $null
 $exitCode = 2
 $stage = 'prerequisites'
 try {
+    $stage = 'windows-platform'
     if ($env:OS -ne 'Windows_NT') { throw 'Unsupported platform' }
     # Prevent inherited Node debug/loader options from logging or executing extra code.
+    $stage = 'runtime-options'
     if ($env:NODE_OPTIONS -or $env:NODE_DEBUG -or $env:NODE_DEBUG_NATIVE -or $env:NODE_TLS_REJECT_UNAUTHORIZED -eq '0') { throw 'Unsafe Node options' }
+    $stage = 'node-discovery'
     $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
+    $stage = 'node-version'
     $version = & $node --version
     if ($LASTEXITCODE -ne 0 -or $version -notmatch '^v24\.') { throw 'Node.js 24 required' }
     $stage = 'integrity'
@@ -68,7 +72,7 @@ try {
     }
     $exitCode = $script:child.ExitCode
 } catch {
-    Write-Host ('STOP: launcher stage=' + $stage + '. No error details printed.')
+    Write-Host ('STOP: launcher stage=' + $stage + '; type=' + $_.Exception.GetType().Name + '. No error details printed.')
     Write-Host 'Use Node.js 24. Keep package files together. Do not bypass company script policy or TLS verification.'
 } finally {
     $script:payload = $null
