@@ -228,6 +228,22 @@ function summary(snapshot, local, unsealed) {
             : 'OPERATOR_WITHOUT_ACTIVE_KEY_OBSERVED';
   return result;
 }
+function compareEvidence(before, after) {
+  const entries = Object.keys(before);
+  if (
+    entries.some(
+      (k) =>
+        before[k].public.exists === null ||
+        after[k].public.exists === null ||
+        before[k].public.readable === false ||
+        after[k].public.readable === false,
+    )
+  )
+    return null;
+  return entries.every(
+    (k) => before[k].hash === after[k].hash && before[k].public.exists === after[k].public.exists,
+  );
+}
 function verifyIntegrity() {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'SHA256SUMS.json'), 'utf8'));
   for (const name of [
@@ -347,11 +363,15 @@ async function main() {
     const snapshot = await readSnapshot(client);
     await client.query('ROLLBACK');
     const output = summary(snapshot, local, unsealed);
-    output.localFilesStable = Object.entries(names).every(
-      ([key, file]) => inspect(file).hash === local[key].hash,
+    const after = Object.fromEntries(
+      Object.entries(names).map(([key, file]) => [key, inspect(file)]),
     );
-    if (!output.localFilesStable) {
-      output.result = 'STOP_LOCAL_EVIDENCE_CHANGED';
+    output.localFilesStable = compareEvidence(local, after);
+    if (output.localFilesStable !== true) {
+      output.result =
+        output.localFilesStable === null
+          ? 'STOP_LOCAL_EVIDENCE_UNREADABLE'
+          : 'STOP_LOCAL_EVIDENCE_CHANGED';
       output.interpretation = 'EVIDENCE_CHANGED_DURING_CHECK';
       output.recovery.usableActiveKey = false;
     }
@@ -382,4 +402,5 @@ module.exports = {
   readSnapshot,
   unsealVerifier,
   verifyIntegrity,
+  compareEvidence,
 };

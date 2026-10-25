@@ -190,6 +190,30 @@ function encryptSynthetic(payload) {
     },
     (r) => assert.ok(!r.recovery.usableActiveKey),
   );
+  assert.equal(
+    tool.compareEvidence(
+      { a: { public: { exists: false }, hash: null } },
+      { a: { public: { exists: false }, hash: null } },
+    ),
+    true,
+  );
+  count++;
+  assert.equal(
+    tool.compareEvidence(
+      { a: { public: { exists: true, readable: false }, hash: null } },
+      { a: { public: { exists: true, readable: false }, hash: null } },
+    ),
+    null,
+  );
+  count++;
+  assert.equal(
+    tool.compareEvidence(
+      { a: { public: { exists: true }, hash: 'a' } },
+      { a: { public: { exists: true }, hash: 'b' } },
+    ),
+    false,
+  );
+  count++;
   const config = await readOnlyConfig({
     approveReadOnly: true,
     expectedHost: 'external.example.invalid',
