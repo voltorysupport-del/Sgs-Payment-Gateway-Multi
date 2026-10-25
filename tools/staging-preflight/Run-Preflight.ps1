@@ -8,6 +8,7 @@ $script:payload = $null
 $script:child = $null
 $script:inputBytes = $null
 $exitCode = 2
+$stage = 'prerequisites'
 try {
     if ($env:OS -ne 'Windows_NT') { throw 'Unsupported platform' }
     # Prevent inherited Node debug/loader options from logging or executing extra code.
@@ -15,6 +16,7 @@ try {
     $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
     $version = & $node --version
     if ($LASTEXITCODE -ne 0 -or $version -notmatch '^v24\.') { throw 'Node.js 24 required' }
+    $stage = 'integrity'
     $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'SHA256SUMS.json') -Raw | ConvertFrom-Json
     foreach ($entry in $manifest.PSObject.Properties) {
         $file = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot $entry.Name))
@@ -22,6 +24,7 @@ try {
         if (-not $file.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid manifest' }
         if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.Value) { throw 'Package mismatch' }
     }
+    $stage = 'consent-and-input'
     if ($ValidateOnly) {
         $script:payload = @{mode='self-test'; sentinel=([string][char]0x20ac + [string][char]0x03bb)} | ConvertTo-Json -Compress
     } else {
@@ -38,6 +41,7 @@ try {
             databaseUrl=[Net.NetworkCredential]::new('', $script:privateUrl).Password
         } | ConvertTo-Json -Compress
     }
+    $stage = 'child-start'
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $node
     $start.Arguments = '"' + (Join-Path $PSScriptRoot 'preflight.js') + '"'
@@ -47,11 +51,16 @@ try {
     $start.RedirectStandardInput = $true
     # Child output contains only fixed check labels, booleans and sanitized errors.
     $script:child = [Diagnostics.Process]::Start($start)
+    $stage = 'private-pipe'
     $script:inputBytes = [Text.Encoding]::UTF8.GetBytes($script:payload)
     $script:child.StandardInput.BaseStream.Write($script:inputBytes, 0, $script:inputBytes.Length)
     [Array]::Clear($script:inputBytes, 0, $script:inputBytes.Length)
     $script:inputBytes = $null
-    $script:child.StandardInput.Close()
+    # Close the raw stream: disposing its unused StreamWriter can append a BOM
+    # on .NET Framework after the UTF-8 JSON has already been written.
+    $script:child.StandardInput.BaseStream.Flush()
+    $script:child.StandardInput.BaseStream.Close()
+    $stage = 'child-completion'
     $script:payload = $null
     if (-not $script:child.WaitForExit(180000)) {
         $script:child.Kill()
@@ -59,7 +68,7 @@ try {
     }
     $exitCode = $script:child.ExitCode
 } catch {
-    Write-Host 'STOP: prerequisite, package verification, consent or launcher failure. No error details printed.'
+    Write-Host ('STOP: launcher stage=' + $stage + '. No error details printed.')
     Write-Host 'Use Node.js 24. Keep package files together. Do not bypass company script policy or TLS verification.'
 } finally {
     $script:payload = $null

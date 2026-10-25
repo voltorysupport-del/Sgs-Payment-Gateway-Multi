@@ -196,6 +196,13 @@ function launcher(directory, executable = 'powershell.exe', extraEnv = {}) {
   if (process.platform === 'win32') {
     for (const executable of ['powershell.exe', 'pwsh.exe']) {
       const result = launcher(packageDirectory, executable);
+      if (result.status !== 0) {
+        const safe = (result.stdout + result.stderr)
+          .split('\n')
+          .filter((line) => /^(STOP:|READY:)/.test(line))
+          .join('\n');
+        process.stderr.write(`${executable} failed with status ${result.status}: ${safe}\n`);
+      }
       assert.equal(result.status, 0, `${executable} launcher failed (details suppressed).`);
       assert.match(result.stdout, /READY:/);
       assert.ok(!result.stdout.includes('NOT-A-CREDENTIAL'));

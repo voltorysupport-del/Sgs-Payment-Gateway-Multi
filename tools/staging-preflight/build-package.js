@@ -32,7 +32,10 @@ function copy(name) {
   // Do not follow symlinked packages or bundle unrelated application dependencies.
   assert.ok(!fs.lstatSync(source).isSymbolicLink());
   copied.set(name, data.version);
-  fs.cpSync(source, path.join(destination, 'node_modules', name), { recursive: true });
+  fs.cpSync(source, path.join(destination, 'node_modules', name), {
+    recursive: true,
+    filter: (file) => !path.basename(file).startsWith('.'),
+  });
   for (const dependency of Object.keys(data.dependencies || {})) copy(dependency);
 }
 copy('pg');
