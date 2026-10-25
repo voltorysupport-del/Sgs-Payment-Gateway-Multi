@@ -3,9 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { Pool } from 'pg';
 import { expect, it } from 'vitest';
 import { openTestDatabase, testDatabaseSettings } from '../test-database.js';
+import { runMigrations } from '../../src/db/migrate.js';
 import { authenticateOperatorKey, generateOperatorApiKey } from '../../src/db/operator-keys.js';
 
-it('upgrades populated schema 003 and rolls back all 004 objects and its migration record after a failure', async () => {
+async function openUpgradeDatabase(): Promise<Pool> {
   // A third empty DB exists ONLY in the verified disposable cluster. This avoids
   // resetting public tables used concurrently by other suites or rewriting SQL.
   const verified = await openTestDatabase();
@@ -26,6 +27,19 @@ it('upgrades populated schema 003 and rolls back all 004 objects and its migrati
     await client.query('ROLLBACK');
     if (identity.rows[0]?.safe !== true)
       throw new Error('Disposable upgrade database identity refused.');
+  } catch (error) {
+    client.release(true);
+    await pool.end();
+    throw error;
+  }
+  client.release();
+  return pool;
+}
+
+it('upgrades populated schema 003 and rolls back all 004 objects and its migration record after a failure', async () => {
+  const pool = await openUpgradeDatabase();
+  const client = await pool.connect();
+  try {
     await client.query('BEGIN');
     await client.query(
       'CREATE TABLE public.schema_migrations(name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())',
@@ -135,3 +149,86 @@ it('upgrades populated schema 003 and rolls back all 004 objects and its migrati
     await pool.end();
   }
 });
+
+it(
+  'serializes concurrent migration bootstrap, applies each file once and still propagates real SQL failures',
+  { timeout: 20_000 },
+  async () => {
+    const pool = await openUpgradeDatabase();
+    const peers = await Promise.all([
+      openUpgradeDatabase(),
+      openUpgradeDatabase(),
+      openUpgradeDatabase(),
+    ]);
+    const blocker = await pool.connect();
+    let runs: Promise<void[]> | undefined;
+    try {
+      // Hold the exact migration lock to prove independent sessions queue BEFORE DDL.
+      await blocker.query('SELECT pg_advisory_lock(894318, 1)');
+      runs = Promise.all(peers.map((peer) => runMigrations(peer)));
+      // Attach rejection handling immediately, even when testing a broken migrator.
+      void runs.catch(() => undefined);
+      let queued = 0;
+      for (let i = 0; i < 100; i++) {
+        const locks = await blocker.query<{
+          count: string;
+        }>(`SELECT count(*) FROM pg_catalog.pg_locks
+        WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
+          AND classid = 894318 AND objid = 1 AND NOT granted`);
+        queued = Number(locks.rows[0]!.count);
+        if (queued === 3) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(queued).toBe(3);
+      expect(
+        (await blocker.query("SELECT to_regclass('public.schema_migrations') AS object")).rows,
+      ).toEqual([{ object: null }]);
+      await blocker.query('SELECT pg_advisory_unlock(894318, 1)');
+      await runs;
+      const before = await blocker.query<{ name: string; applied_at: Date }>(
+        'SELECT name, applied_at FROM public.schema_migrations ORDER BY name',
+      );
+      expect(before.rows.map((row) => row.name)).toEqual([
+        '001_initial_schema.sql',
+        '002_operator_api_keys.sql',
+        '003_api_key_permissions.sql',
+        '004_dashboard_auth.sql',
+      ]);
+      await Promise.all(peers.map((peer) => runMigrations(peer)));
+      expect(
+        (await blocker.query('SELECT name, applied_at FROM public.schema_migrations ORDER BY name'))
+          .rows,
+      ).toEqual(before.rows);
+      // Deliberately inconsistent disposable history: the DDL MUST fail, not be ignored.
+      const first = before.rows[0]!;
+      await blocker.query('DELETE FROM public.schema_migrations WHERE name = $1', [first.name]);
+      try {
+        await expect(runMigrations(peers[0])).rejects.toMatchObject({ code: '42P07' });
+        expect(
+          (
+            await blocker.query('SELECT name FROM public.schema_migrations WHERE name = $1', [
+              first.name,
+            ])
+          ).rowCount,
+        ).toBe(0);
+        const locks = await blocker.query<{
+          count: string;
+        }>(`SELECT count(*) FROM pg_catalog.pg_locks
+        WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
+          AND classid = 894318 AND objid = 1 AND granted`);
+        expect(Number(locks.rows[0]!.count)).toBe(0);
+      } finally {
+        await blocker.query(
+          'INSERT INTO public.schema_migrations(name, applied_at) VALUES ($1, $2)',
+          [first.name, first.applied_at],
+        );
+      }
+      await runMigrations(peers[0]);
+    } finally {
+      await blocker.query('SELECT pg_advisory_unlock_all()');
+      await runs?.catch(() => undefined);
+      blocker.release();
+      await Promise.all([...peers, pool].map((peer) => peer.end()));
+    }
+  },
+);

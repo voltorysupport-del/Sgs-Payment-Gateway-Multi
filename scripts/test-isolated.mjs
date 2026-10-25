@@ -289,11 +289,12 @@ try {
     '--username=vaultx_test',
     '--dbname=vaultx_pay_upgrade_test',
     '--set=ON_ERROR_STOP=1',
-    "--command=SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'",
+    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments), (SELECT count(*) FROM dashboard_users), (SELECT count(*) FROM dashboard_memberships), (SELECT count(*) FROM dashboard_sessions), (SELECT count(*) FROM dashboard_login_limits); ROLLBACK;',
   ]);
-  if (upgradeRemaining !== '0') throw new Error('Upgrade test transaction was not rolled back.');
+  if (upgradeRemaining !== '4|0|0|0|0|0|0|0')
+    throw new Error('Upgrade/migration race fixtures were not cleaned up.');
   process.stdout.write(
-    'Confirmed upgrade-only disposable database retains zero public relations.\n',
+    'Confirmed upgrade/race disposable database: 4 migrations applied; zero application/auth fixtures remain.\n',
   );
   if (check) await npm('build');
 } catch (error) {

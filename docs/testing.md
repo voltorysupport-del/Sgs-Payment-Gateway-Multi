@@ -137,3 +137,32 @@ They derive its connection only from the verified disposable test connection.
 The provisioning CLI refuses the ordinary test database. Both databases must have
 zero operator/key/payment fixtures at the end of a successful test run. No Render
 database is used. See [staging-provisioning.md](staging-provisioning.md).
+
+## Concurrent migration setup
+
+Vitest integration files may run in parallel. The application and dashboard
+suites intentionally share the independently verified disposable database; each
+calls the real migration runner. Do not disable parallel execution to conceal
+migration races.
+
+`runMigrations` reserves one PostgreSQL connection and takes the database-scoped
+session advisory lock `(894318, 1)` before creating migration history or checking
+pending files. The same connection applies each file and its history record in
+one transaction. Other runners recheck history only after obtaining the lock.
+The lock is explicitly released before returning the connection; uncertain
+connection/lock state discards that connection. SQL errors propagate unchanged
+and failed migrations roll back. No duplicate-object error is treated as success.
+This preserves the previous per-file commit behavior, rather than making an
+entire batch one transaction. All concurrent runners must use this protocol;
+older binaries and manual schema changes do not participate in the lock.
+
+The upgrade-only disposable database also exercises three simultaneous runners,
+unchanged timestamps on rerun, and SQL-error propagation/lock release. Its
+populated schema-003 upgrade test still rolls back its fixtures first; the race
+test then leaves four migrations and zero application/auth fixtures, checked by
+the runner. No shared public schema is reset.
+
+The Linux workflow runs on pushes and PRs targeting main or the development base.
+Its `--ci-service` mode uses the inspected, tmpfs-backed PostgreSQL 17 service
+with fresh restricted credentials, the same safety guards and the same tests.
+It does not use staging or an inherited application DATABASE_URL.
