@@ -45,3 +45,17 @@ performed in the first real smoke test; failure scenarios are tested offline.
 Automated validation uses synthetic transport/DPAPI fixtures, never staging. Native
 DPAPI validation and downloadable artifact publication require their own approval.
 No claimed Windows result should be inferred from a Linux skip.
+
+Health connectivity diagnostics
+Only unauthenticated GET /health permits 120 seconds socket inactivity and a
+150-second overall deadline for Render cold starts. All other deadlines remain
+15/30 seconds. No request is automatically retried. Error categories contain no
+raw network messages. DNS, TLS_CERTIFICATE, TLS_HANDSHAKE, CONNECTION_POLICY,
+CONNECTION_REFUSED, CONNECTION_RESET, CONNECT_TIMEOUT, SOCKET_IDLE_TIMEOUT and
+REQUEST_DEADLINE distinguish common causes without proving a specific cause.
+This direct HTTPS client does not inherit browser/system proxy settings; a
+corporate proxy or trust-store difference may require administrator diagnosis.
+Never disable TLS verification or corporate security controls to resolve it.
+A failed HEALTH check creates no payment journal. Any pre-existing journal
+remains protected and must never be removed or bypassed. A new real staging
+execution requires separate approval even when writesAttempted was false.

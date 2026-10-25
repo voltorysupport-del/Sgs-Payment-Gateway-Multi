@@ -139,6 +139,26 @@ function fixture(mode) {
     total++;
     process.stdout.write(`Simulated client ${mode}: expected safety/call-count result passed.\n`);
   }
+  const { networkReason, requestLimits } = require(path.join(directory, 'flow.js'));
+  for (const [code, expected] of [
+    ['ENOTFOUND', 'DNS'],
+    ['EAI_AGAIN', 'DNS'],
+    ['UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'TLS_CERTIFICATE'],
+    ['ERR_TLS_CERT_ALTNAME_INVALID', 'TLS_CERTIFICATE'],
+    ['ERR_SSL_PROTOCOL_ERROR', 'TLS_HANDSHAKE'],
+    ['ECONNRESET', 'CONNECTION_RESET'],
+    ['ECONNREFUSED', 'CONNECTION_REFUSED'],
+    ['ETIMEDOUT', 'CONNECT_TIMEOUT'],
+    ['PRIVATE_DETAIL', 'NETWORK_OTHER'],
+  ]) {
+    assert.equal(networkReason({ code, message: 'PRIVATE_DETAIL' }), expected);
+    total++;
+  }
+  assert.deepEqual(requestLimits('GET', '/health', false), { idle: 120000, total: 150000 });
+  assert.deepEqual(requestLimits('POST', '/payments', true), { idle: 15000, total: 30000 });
+  assert.deepEqual(requestLimits('GET', '/health', true), { idle: 15000, total: 30000 });
+  assert.deepEqual(requestLimits('GET', '/payments/' + id, true), { idle: 15000, total: 30000 });
+  total += 4;
   const saved = https.request;
   let captured;
   try {
@@ -173,6 +193,68 @@ function fixture(mode) {
     total++;
   } finally {
     https.request = saved;
+  }
+  // Exercise real transport timer callbacks without sockets or waiting 150 seconds.
+  const savedTimer = globalThis.setTimeout,
+    savedClear = globalThis.clearTimeout;
+  try {
+    for (const mode of ['idle', 'deadline', 'dns', 'certificate', 'policy']) {
+      let deadlineCallback,
+        idleCallback,
+        destroys = 0,
+        calls = 0;
+      globalThis.setTimeout = (callback, ms) => {
+        assert.equal(ms, 150000);
+        deadlineCallback = callback;
+        return 1;
+      };
+      globalThis.clearTimeout = () => {};
+      https.request = () => {
+        calls++;
+        const req = new EventEmitter();
+        req.setTimeout = (ms, callback) => {
+          assert.equal(ms, 120000);
+          idleCallback = callback;
+        };
+        req.destroy = () => {
+          destroys++;
+          req.emit('error', { code: 'ECONNRESET', message: 'PRIVATE' });
+          req.emit('close');
+        };
+        req.end = () => {
+          if (mode === 'idle') idleCallback();
+          else if (mode === 'deadline') deadlineCallback();
+          else {
+            req.emit('error', {
+              code: { dns: 'ENOTFOUND', certificate: 'CERT_HAS_EXPIRED', policy: 'EACCES' }[mode],
+              message: 'PRIVATE',
+            });
+            req.emit('close');
+          }
+        };
+        return req;
+      };
+      const expected = {
+        idle: 'SOCKET_IDLE_TIMEOUT',
+        deadline: 'REQUEST_DEADLINE',
+        dns: 'DNS',
+        certificate: 'TLS_CERTIFICATE',
+        policy: 'CONNECTION_POLICY',
+      }[mode];
+      await assert.rejects(
+        transport('https://vaultx-staging.onrender.com', 'SYNTHETIC')('GET', '/health', undefined, {
+          auth: false,
+        }),
+        (e) => e.phase === expected && !JSON.stringify(e).includes('PRIVATE'),
+      );
+      assert.equal(calls, 1);
+      assert.equal(destroys, ['idle', 'deadline'].includes(mode) ? 1 : 0);
+      total++;
+    }
+  } finally {
+    https.request = saved;
+    globalThis.setTimeout = savedTimer;
+    globalThis.clearTimeout = savedClear;
   }
   if (process.platform === 'win32') {
     const { execFile } = require('node:child_process');

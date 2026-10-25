@@ -27,6 +27,34 @@ function origin(value) {
     throw new TestFailure('ORIGIN');
   return u.origin;
 }
+// Allowlisted categories only: never return error messages, URLs or socket details.
+function networkReason(error) {
+  const code = error?.code;
+  if (['ENOTFOUND', 'EAI_AGAIN'].includes(code)) return 'DNS';
+  if (
+    [
+      'CERT_HAS_EXPIRED',
+      'DEPTH_ZERO_SELF_SIGNED_CERT',
+      'SELF_SIGNED_CERT_IN_CHAIN',
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+      'ERR_TLS_CERT_ALTNAME_INVALID',
+    ].includes(code)
+  )
+    return 'TLS_CERTIFICATE';
+  if (typeof code === 'string' && (code.startsWith('ERR_TLS_') || code.startsWith('ERR_SSL_')))
+    return 'TLS_HANDSHAKE';
+  if (['EACCES', 'EPERM'].includes(code)) return 'CONNECTION_POLICY';
+  if (code === 'ECONNREFUSED') return 'CONNECTION_REFUSED';
+  if (code === 'ECONNRESET') return 'CONNECTION_RESET';
+  if (code === 'ETIMEDOUT') return 'CONNECT_TIMEOUT';
+  return 'NETWORK_OTHER';
+}
+function requestLimits(method, pathname, auth) {
+  return method === 'GET' && pathname === '/health' && auth === false
+    ? { idle: 120000, total: 150000 }
+    : { idle: 15000, total: 30000 };
+}
 function transport(base, apiKey) {
   const trusted = origin(base),
     agent = new https.Agent({ keepAlive: false, rejectUnauthorized: true, minVersion: 'TLSv1.2' });
@@ -57,7 +85,7 @@ function transport(base, apiKey) {
             text += chunk;
             if (text.length > 65536) res.destroy();
           });
-          res.on('error', () => reject(new TestFailure('NETWORK')));
+          res.on('error', (error) => reject(new TestFailure(networkReason(error))));
           res.on('end', () => {
             if (res.statusCode >= 300 && res.statusCode < 400) {
               reject(new TestFailure('REDIRECT_REFUSED', res.statusCode));
@@ -71,10 +99,20 @@ function transport(base, apiKey) {
           });
         },
       );
-      const deadline = setTimeout(() => req.destroy(), 30000);
+      const limits = requestLimits(method, pathname, auth);
+      let timeoutReason;
+      const deadline = setTimeout(() => {
+        timeoutReason = 'REQUEST_DEADLINE';
+        reject(new TestFailure(timeoutReason));
+        req.destroy();
+      }, limits.total);
       req.once('close', () => clearTimeout(deadline));
-      req.setTimeout(15000, () => req.destroy());
-      req.on('error', () => reject(new TestFailure('NETWORK')));
+      req.setTimeout(limits.idle, () => {
+        timeoutReason = 'SOCKET_IDLE_TIMEOUT';
+        reject(new TestFailure(timeoutReason));
+        req.destroy();
+      });
+      req.on('error', (error) => reject(new TestFailure(timeoutReason || networkReason(error))));
       if (encoded) req.write(encoded);
       req.end();
     });
@@ -188,4 +226,4 @@ async function run({ request, confirm, begin, record, runId = crypto.randomUUID(
     throw failure;
   }
 }
-module.exports = { origin, transport, run, CONFIRM, TestFailure };
+module.exports = { origin, transport, run, CONFIRM, TestFailure, networkReason, requestLimits };
