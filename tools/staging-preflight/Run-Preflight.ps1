@@ -16,7 +16,9 @@ try {
     $stage = 'runtime-options'
     if ($env:NODE_OPTIONS -or $env:NODE_DEBUG -or $env:NODE_DEBUG_NATIVE -or $env:NODE_TLS_REJECT_UNAUTHORIZED -eq '0') { throw 'Unsafe Node options' }
     $stage = 'node-discovery'
-    $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
+    # ApplicationInfo.Path is the executable path on Windows PowerShell 5.1;
+    # Source is not a reliable invocation path across PowerShell versions.
+    $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Path
     $stage = 'node-version'
     $version = & $node --version
     if ($LASTEXITCODE -ne 0 -or $version -notmatch '^v24\.') { throw 'Node.js 24 required' }
