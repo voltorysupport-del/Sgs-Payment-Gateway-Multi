@@ -59,6 +59,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 9
+      - name: Download the actual uploaded ZIP for verification
+        uses: actions/download-artifact@v4
+        with:
+          name: VaultX-ReadOnly-Preflight-Windows
+          path: '${{ runner.temp }}/VaultX Downloaded & Verified'
+      - name: Validate the downloaded artifact contents and native launchers
+        shell: pwsh
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP 'VaultX Downloaded & Verified'
+          foreach ($name in @('Start-Preflight.cmd', 'Run-Preflight.ps1', 'preflight.js', 'README.txt', 'SHA256SUMS.json', 'PROVENANCE.json', 'package.json', 'node_modules/pg/package.json')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $download $name) -PathType Leaf)) { throw 'Downloaded artifact is incomplete' }
+          }
+          node tools/staging-preflight/validate-package.js "$download"
+          if ($LASTEXITCODE -ne 0) { throw 'Downloaded artifact failed validation' }
+          Write-Output 'Actual uploaded ZIP verified: launcher, checker, instructions, checksums and native execution.'
       - name: Record authenticated artifact download link
         shell: pwsh
         run: |

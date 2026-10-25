@@ -76,7 +76,9 @@ try {
     }
     $exitCode = $script:child.ExitCode
 } catch {
-    Write-Host ('STOP: launcher stage=' + $stage + '; type=' + $_.Exception.GetType().Name + '. No error details printed.')
+    $command = [string]$_.TargetObject
+    if ($command -notin @('Get-Content','ConvertFrom-Json','Get-FileHash','Join-Path','New-Object','Select-Object','Get-Command')) { $command = 'not-allowlisted' }
+    Write-Host ('STOP: launcher stage=' + $stage + '; type=' + $_.Exception.GetType().Name + '; command=' + $command + '. No error details printed.')
     Write-Host 'Use Node.js 24. Keep package files together. Do not bypass company script policy or TLS verification.'
 } finally {
     $script:payload = $null

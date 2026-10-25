@@ -150,6 +150,9 @@ function launcher(directory, executable = 'powershell.exe', extraEnv = {}) {
     {
       env: {
         ...process.env,
+        // Each PowerShell edition must initialize its own built-in module paths.
+        // Inheriting pwsh's Core module path breaks Windows PowerShell 5.1 autoload.
+        PSModulePath: '',
         NODE_OPTIONS: '',
         NODE_DEBUG: '',
         NODE_DEBUG_NATIVE: '',
