@@ -165,3 +165,20 @@ it('formats currency using its minor-unit precision', async () => {
   expect(money({ ...payment, currency: 'KWD', amountMinor: 1000 })).toContain('1.000');
   expect(money({ ...payment, currency: 'ZZZ', amountMinor: 100 })).toBe('100 minor units · ZZZ');
 });
+it('discards the previous workspace when authoritative identity changes, including batched revalidation', async () => {
+  render(<App />);
+  await screen.findByText('€1.00');
+  vi.mocked(api.me).mockResolvedValue({
+    ...identity,
+    user: {
+      ...identity.user,
+      id: '44444444-4444-4444-8444-444444444444',
+      username: 'replacement-viewer',
+    },
+  });
+  vi.mocked(api.history).mockRejectedValue(new ApiError(403));
+  fireEvent(window, new Event('pageshow'));
+  await screen.findByText('replacement-viewer');
+  await screen.findByRole('alert');
+  expect(screen.queryByText('€1.00')).toBeNull();
+});

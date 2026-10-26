@@ -470,6 +470,7 @@ export function App() {
   const [auth] = useState(() => new DashboardAuth());
   const state = useSyncExternalStore(auth.subscribe, auth.snapshot);
   const [view, setView] = useState<View>(route);
+  const version = auth.version();
   useEffect(() => auth.start(), [auth]);
   useEffect(() => {
     const hash = () => setView(route());
@@ -484,8 +485,7 @@ export function App() {
         heading.focus();
       }
     }
-  }, [state.phase, state.identity?.user.id, view]);
-  const version = auth.version();
+  }, [state.phase, state.identity?.user.id, view, version]);
   const expire = useCallback(() => auth.expire(version), [auth, version]);
   if (['checking', 'login', 'logout'].includes(state.phase))
     return (
@@ -515,7 +515,7 @@ export function App() {
     return <Login onLogin={auth.login} error={state.error} />;
   const identity = state.identity;
   return (
-    <div className="app-shell">
+    <div className="app-shell" key={`${version}:${identity.user.id}:${identity.operator.id}`}>
       <a
         href="#main-content"
         className="skip-link"
