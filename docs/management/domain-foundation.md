@@ -1,0 +1,35 @@
+# Management domain foundation — disabled, synthetic-testable
+
+This foundation retains `operators` as client organizations and preserves the one-membership-per-user, viewer-only client model. No parallel tenant system, default owner, credential, client administrator, sponsor, invitation or grant issuer is introduced. Existing machine authentication, key scopes, payment lifecycle/idempotency, signed BFF restrictions and viewer grant rules remain independent.
+
+## Implemented domain
+
+Migration 006 adds management revisions to operators and separate owner principals, exact platform permissions/grants, hashed MFA-assured session records, a platform policy gate and append-only management audit. It seeds only catalog/policy rows, never accounts, sessions or human grants. Owner identity is never derived from a client cookie, membership role, machine key or submitted actor ID.
+
+`executeManagement` consumes existing verified owner-session records; it is not a login or MFA verifier. No session/account creation or owner-policy mutation entry point is exposed. The only supported platform permissions are `platform.clients.read`, `platform.clients.manage` and `platform.audit.read`. It supports bounded client directory/detail, retained memberships/grant inspection, operator name/status changes, withdrawal of the two existing human entitlement ceilings, and bounded audit reads. No create-user/operator endpoint, promotion, delegation, grant restoration, machine-key management, payment access or payment write operation is added.
+
+Metadata and status updates require an expected management version; every accepted update, including a no-op, consumes that version. Stale/replayed versions fail. Entitlement withdrawal advances the management/policy versions, permanently revokes affected viewer grants and invalidates sessions using migration 005's existing triggers. Reactivation never restores withdrawn human grants; existing independent non-revoked machine-key behavior is unchanged.
+
+## Transactions, concurrency and audit
+
+Owner admission uses a bounded READ COMMITTED lease. Lock order is shared platform pre-gate/policy → owner identity → exact active owner grants → owner session → tenant pre-gate/policy → ordered client users/memberships → operator → grants → client sessions. Tenant changes use the exclusive tenant gate and prelock rows before DML. Client-only paths never acquire owner locks. Owner-policy reducers are not exposed; their defensive triggers require a preowned exclusive platform gate. No database lease spans HTTP, hashing or browser interaction.
+
+Owner eligibility, current versions, 15-minute idle/one-hour absolute expiry and MFA assurance are rechecked after blocking locks. Writes require MFA verification within five minutes and the current session CSRF verifier. The final conditional session refresh rechecks the clocks after audit; failure throws and rolls back all business/audit work. No operation automatically retries after timeouts or ambiguous commit. Tenant mutations cap synchronous membership fan-out at 1,000; larger populations fail closed and need a separately reviewed batch protocol.
+
+Every successful privileged business read/write inserts audit in the same transaction before returning. Audit failure rolls back mutations and prevents returning data. Records contain constrained actor/resource IDs, actor/target/policy revisions, success outcome, server time, MFA verification time, bounded request correlation and allowlisted summaries; operator names, usernames, keys, verifiers, cookies and request bodies are not included. Denials currently produce sanitized request logs rather than durable per-attempt audit records. UPDATE/DELETE/TRUNCATE of audit reject; no runtime role may alter the guards. Disposable tests explicitly remove their own synthetic evidence using a guarded schema-owner teardown; that helper is not a production maintenance command.
+
+## Upgrade and deployment limits
+
+006 is additive and leaves populated 005 users, grants, verifiers, keys and payments unchanged. Migration tests inject a transactional failure and verify rollback of the new tables/column/ledger, then verify the successful compatibility upgrade. There is no supported down migration. An old binary would not enforce owner authorization; keep new ingress/gates unavailable during any rollback.
+
+The existing server still runs migrations through its startup pool. This initiative does not authorize a deployment or external migration. Separate migration/runtime credentials, verification-only startup, explicit hostname/certificate-verified runtime PostgreSQL TLS, actual least privilege and independent audit retention remain prerequisites. Tests exercise actual restricted disposable roles but do not prove deployed privileges. A database owner or compromised application process is outside ordinary append-only/row-predicate guarantees.
+
+## Decisions intentionally unresolved
+
+Approved architecture requires MFA plus a separately reviewed two-custodian first-owner/recovery ceremony. Authenticator selection, enrollment/proof provenance, custodians, recovery, owner hostname/proxy custody and production session-policy acceptance are not selected here. Client administrator root provenance, sponsor/delegation rules and membership history also remain unimplemented. Schema assurance records are consumed only and synthetic fixtures cannot be used as an enrollment recipe. No production policy mutation tool exists.
+
+The later HTTP integration must remain default off and development/test-only until those decisions and deployment prerequisites are approved. This is a real management service foundation, not a usable production owner-login platform.
+
+## Reproduction
+
+Use Node.js 24 and Docker with `npm ci`, then `npm run test:isolated -- --check`. The runner provisions and verifies a new disposable PostgreSQL 17 cluster, applies all six migrations and checks that no test identities, keys, payments, sessions or audit evidence remain. No Render/developer database is used. Explicit barrier tests exercise permission/session revocation, stale concurrent updates, audit rollback and expiry while waiting on locks. Browser execution additionally requires Chromium (`npx playwright install chromium`) and `VAULTX_BROWSER_TESTS=true` in the test environment.
