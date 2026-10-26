@@ -19,6 +19,17 @@ BEGIN
  RETURN NEW;
 END; $$;
 CREATE TRIGGER operator_management_version BEFORE UPDATE ON public.operators FOR EACH ROW EXECUTE FUNCTION public.advance_operator_management_version();
+-- Every actual ceiling withdrawal, including controlled maintenance, consumes
+-- one operator revision. The HTTP service must only re-read that revision.
+CREATE FUNCTION public.advance_withdrawal_management_version() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER
+ SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+ PERFORM public.require_viewer_policy_gate(NEW.operator_id);
+ UPDATE public.operators SET management_version=management_version+1 WHERE id=NEW.operator_id;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER entitlement_management_version AFTER UPDATE ON public.operator_permission_entitlements
+ FOR EACH ROW WHEN (OLD.enabled AND NOT NEW.enabled) EXECUTE FUNCTION public.advance_withdrawal_management_version();
 CREATE TABLE public.management_policy (
  id TEXT PRIMARY KEY CHECK(id='platform'),
  authorization_version INTEGER NOT NULL DEFAULT 1 CHECK(authorization_version>0)

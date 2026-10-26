@@ -464,8 +464,8 @@ export async function executeManagement(
             if (!changed.rowCount) return denied('conflict');
             operator = (
               await client.query<OperatorRow>(
-                'UPDATE public.operators SET management_version=$2 WHERE id=$1 RETURNING id,code,name,status,management_version',
-                [targetId, command.expectedVersion + 1],
+                'SELECT id,code,name,status,management_version FROM public.operators WHERE id=$1',
+                [targetId],
               )
             ).rows[0]!;
             const revision = await client.query<{ authorization_version: number }>(

@@ -863,3 +863,70 @@ it('rejects revision jumps, reductions and null proposals even with metadata cha
       .management_version,
   ).toBe(3);
 });
+
+it('counts a pre-gated maintenance withdrawal once and invalidates stale administrative forms', async () => {
+  const viewer = randomBytes(32).toString('hex');
+  await insertViewerSession(pool, user, viewer, randomBytes(32).toString('hex'));
+  await policyTransaction(pool, operator, (client) =>
+    client.query(
+      "UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code='client.payments.read'",
+      [operator],
+    ),
+  );
+  expect(
+    (await pool.query('SELECT management_version FROM operators WHERE id=$1', [operator])).rows[0]
+      .management_version,
+  ).toBe(2);
+  expect(
+    (await pool.query('SELECT token_hash FROM dashboard_sessions WHERE user_id=$1', [user]))
+      .rowCount,
+  ).toBe(0);
+  await policyTransaction(pool, operator, (client) =>
+    client.query(
+      "UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code='client.payments.read'",
+      [operator],
+    ),
+  );
+  expect(
+    (await pool.query('SELECT management_version FROM operators WHERE id=$1', [operator])).rows[0]
+      .management_version,
+  ).toBe(2);
+  expect(
+    await executeManagement(pool, actor.tokenHash, {
+      action: 'operators.update',
+      targetId: operator,
+      expectedVersion: 1,
+      csrfHash: actor.csrfHash,
+      patch: { name: 'Stale after maintenance' },
+    }),
+  ).toEqual({ ok: false, error: 'conflict' });
+  expect(
+    await executeManagement(pool, actor.tokenHash, {
+      action: 'entitlements.withdraw',
+      targetId: operator,
+      expectedVersion: 2,
+      csrfHash: actor.csrfHash,
+      permission: 'client.status.read',
+    }),
+  ).toMatchObject({ ok: true, value: { operator: { version: 3 }, policyVersion: 3 } });
+  expect(
+    (
+      await pool.query('SELECT target_version,summary FROM management_audit WHERE actor_id=$1', [
+        actor.id,
+      ])
+    ).rows,
+  ).toEqual([
+    {
+      target_version: 3,
+      summary: { permission: 'client.status.read', version: 3, policyVersion: 3 },
+    },
+  ]);
+  expect(
+    (
+      await pool.query(
+        'SELECT id FROM membership_permission_grants WHERE membership_id=$1 AND revoked_at IS NULL',
+        [member],
+      )
+    ).rowCount,
+  ).toBe(0);
+});
