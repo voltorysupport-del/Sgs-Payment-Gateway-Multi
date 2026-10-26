@@ -5,3 +5,5 @@ import { build } from 'vite';
 // React/JSX output; server and test safety flags remain untouched.
 process.env.NODE_ENV = 'production';
 await build({ configFile: 'frontend/vite.config.ts' });
+
+await build({ configFile: 'frontend/owner.vite.config.ts' });
