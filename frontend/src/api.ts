@@ -50,9 +50,10 @@ async function request<T>(
   schema: z.ZodType<T>,
   signal?: AbortSignal,
   init?: RequestInit,
+  cookieSequence = false,
 ): Promise<T> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = cookieSequence ? undefined : setTimeout(() => controller.abort(), 12000);
   const abort = () => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) controller.abort();
@@ -81,7 +82,13 @@ async function request<T>(
 export const api = {
   me: (signal?: AbortSignal) => request('/dashboard-api/auth/me', identitySchema, signal),
   login: async (username: string, password: string) => {
-    const { csrfToken } = await request('/dashboard-api/auth/csrf', csrfSchema);
+    const { csrfToken } = await request(
+      '/dashboard-api/auth/csrf',
+      csrfSchema,
+      undefined,
+      undefined,
+      true,
+    );
     await request(
       '/dashboard-api/auth/login',
       z.object({ authenticated: z.literal(true), csrfToken: csrfSchema.shape.csrfToken }),
@@ -91,14 +98,27 @@ export const api = {
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
         body: JSON.stringify({ username, password }),
       },
+      true,
     );
   },
   logout: async () => {
-    const { csrfToken } = await request('/dashboard-api/auth/csrf', csrfSchema);
-    await request('/dashboard-api/auth/logout', z.unknown(), undefined, {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': csrfToken },
-    });
+    const { csrfToken } = await request(
+      '/dashboard-api/auth/csrf',
+      csrfSchema,
+      undefined,
+      undefined,
+      true,
+    );
+    await request(
+      '/dashboard-api/auth/logout',
+      z.unknown(),
+      undefined,
+      {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrfToken },
+      },
+      true,
+    );
   },
   history: async (offset: number, status: string, currency: string, signal?: AbortSignal) => {
     const query = new URLSearchParams({ limit: '10', offset: String(offset) });

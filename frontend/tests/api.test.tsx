@@ -86,3 +86,26 @@ it('rejects mismatched pagination and non-simulator payment records', async () =
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(p))));
   await expect(api.detail('44444444-4444-4444-8444-444444444444')).rejects.toBeInstanceOf(ApiError);
 });
+it('keeps cookie-setting sequences pending beyond the read deadline instead of allowing late-cookie retries', async () => {
+  vi.useFakeTimers();
+  try {
+    let release!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ csrfToken: 'a'.repeat(64) })))
+      .mockReturnValueOnce(pending);
+    vi.stubGlobal('fetch', fetcher);
+    const operation = api.login('viewer', 'synthetic password only');
+    await vi.advanceTimersByTimeAsync(13000);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    const options = fetcher.mock.calls[1]![1] as RequestInit;
+    expect(options.signal?.aborted).toBe(false);
+    release(new Response(JSON.stringify({ authenticated: true, csrfToken: 'a'.repeat(64) })));
+    await operation;
+  } finally {
+    vi.useRealTimers();
+  }
+});

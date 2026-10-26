@@ -592,7 +592,7 @@ dd {
   gap: 60px;
   overflow: hidden;
 }
-.login-story h1 {
+.login-story h2 {
   font-size: 52px;
   line-height: 1.16;
   margin: 20px 0;
@@ -636,7 +636,7 @@ dd {
   width: 100%;
   max-width: 355px;
 }
-.login-card h2 {
+.login-card h1 {
   font-size: 30px;
   margin: 28px 0 7px;
   letter-spacing: -1px;
@@ -723,7 +723,7 @@ dd {
   .topbar {
     justify-content: flex-end;
   }
-  .login-story h1 {
+  .login-story h2 {
     font-size: 42px;
   }
 }
@@ -853,7 +853,7 @@ dd {
   .login-form {
     padding: 45px 25px;
   }
-  .login-card h2 {
+  .login-card h1 {
     font-size: 28px;
   }
 }

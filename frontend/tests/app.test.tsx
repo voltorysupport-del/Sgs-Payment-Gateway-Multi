@@ -33,6 +33,10 @@ const payment = {
   updatedAt: '2026-01-01T12:01:00.000Z',
 };
 beforeEach(() => {
+  Object.defineProperty(navigator, 'locks', {
+    configurable: true,
+    value: { request: (_name: string, _options: unknown, work: () => Promise<unknown>) => work() },
+  });
   location.hash = '#/';
   vi.mocked(api.me).mockResolvedValue(identity);
   vi.mocked(api.history).mockResolvedValue({
@@ -64,7 +68,9 @@ it('renders scoped summary without fabricated aggregates and has no automated ac
   expect(result.violations).toEqual([]);
 });
 it('uses real authentication client and clears password after login', async () => {
-  vi.mocked(api.me).mockRejectedValueOnce(new ApiError(401));
+  vi.mocked(api.me)
+    .mockRejectedValueOnce(new ApiError(401))
+    .mockRejectedValueOnce(new ApiError(401));
   render(<App />);
   await screen.findByRole('heading', { name: 'Welcome back' });
   await userEvent.type(screen.getByLabelText('Username'), 'viewer');

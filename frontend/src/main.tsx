@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, ApiError, type Identity, type Payment } from './api';
+import { api, ApiError, type Payment } from './api';
 import './styles.css';
+import { DashboardAuth } from './auth';
 
 type View = 'overview' | 'payments' | 'status' | `payments/${string}`;
 const route = (): View => {
@@ -106,9 +107,13 @@ function Table({ payments }: { payments: Payment[] }) {
     </div>
   );
 }
-function Login({ onLogin }: { onLogin: () => Promise<void> }) {
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
+function Login({
+  onLogin,
+  error,
+}: {
+  onLogin: (username: string, password: string) => Promise<void>;
+  error?: string;
+}) {
   return (
     <main className="login">
       <section className="login-story">
@@ -118,11 +123,11 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
         </a>
         <div>
           <span className="eyebrow">YOUR OPERATOR WORKSPACE</span>
-          <h1>
+          <h2>
             Clarity in
             <br />
             every transaction.
-          </h1>
+          </h2>
           <p>
             A focused view of your payment activity.
             <br />
@@ -139,29 +144,17 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
       <section className="login-form">
         <div className="login-card">
           <span className="mode">● SIMULATOR MODE</span>
-          <h2>Welcome back</h2>
+          <h1 tabIndex={-1}>Welcome back</h1>
           <p className="muted">Sign in to your operator workspace.</p>
           <form
             onSubmit={(event) => {
               event.preventDefault();
               const form = event.currentTarget;
               const data = new FormData(form);
-              setBusy(true);
-              setError('');
-              void api
-                .login(field(data, 'username'), field(data, 'password'))
-                .then(onLogin)
-                .catch((e: unknown) =>
-                  setError(
-                    e instanceof ApiError && e.status === 401
-                      ? 'Invalid username or password.'
-                      : message(e),
-                  ),
-                )
-                .finally(() => {
-                  form.reset();
-                  setBusy(false);
-                });
+              const username = field(data, 'username'),
+                password = field(data, 'password');
+              form.reset();
+              void onLogin(username, password);
             }}
           >
             <label htmlFor="username">Username</label>
@@ -186,9 +179,7 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
               maxLength={128}
             />
             {error && <Alert>{error}</Alert>}
-            <button className="primary" disabled={busy}>
-              {busy ? 'Signing in…' : 'Sign in securely →'}
-            </button>
+            <button className="primary">Sign in securely →</button>
           </form>
           <p className="login-note">
             Access is limited to your assigned operator.
@@ -476,102 +467,53 @@ function Status({ onExpired }: { onExpired: () => void }) {
   );
 }
 export function App() {
-  const [identity, setIdentity] = useState<Identity>();
-  const [checking, setChecking] = useState(true);
-  const [failure, setFailure] = useState('');
+  const [auth] = useState(() => new DashboardAuth());
+  const state = useSyncExternalStore(auth.subscribe, auth.snapshot);
   const [view, setView] = useState<View>(route);
-  const generation = useRef(0);
-  const expire = useCallback(() => {
-    generation.current++;
-    setIdentity(undefined);
-    setChecking(false);
-  }, []);
-  const check = useCallback(async () => {
-    const current = ++generation.current;
-    setChecking(true);
-    setIdentity(undefined);
-    setFailure('');
-    try {
-      const value = await api.me();
-      if (current === generation.current) setIdentity(value);
-    } catch (e) {
-      if (current === generation.current && !(e instanceof ApiError && e.status === 401))
-        setFailure(message(e));
-    } finally {
-      if (current === generation.current) setChecking(false);
-    }
-  }, []);
+  useEffect(() => auth.start(), [auth]);
   useEffect(() => {
-    void check();
     const hash = () => setView(route());
-    const visibility = () => {
-      if (document.visibilityState === 'hidden') {
-        generation.current++;
-        setIdentity(undefined);
-        setChecking(true);
-      } else void check();
-    };
-    const pageshow = () => {
-      void check();
-    };
-    const channel =
-      typeof BroadcastChannel !== 'undefined'
-        ? new BroadcastChannel('vaultx-dashboard-session')
-        : undefined;
-    if (channel)
-      channel.onmessage = () => {
-        void check();
-      };
     window.addEventListener('hashchange', hash);
-    document.addEventListener('visibilitychange', visibility);
-    window.addEventListener('pageshow', pageshow);
-    return () => {
-      generation.current++;
-      channel?.close();
-      window.removeEventListener('hashchange', hash);
-      document.removeEventListener('visibilitychange', visibility);
-      window.removeEventListener('pageshow', pageshow);
-    };
-  }, [check]);
+    return () => window.removeEventListener('hashchange', hash);
+  }, []);
   useEffect(() => {
-    document.getElementById('main-content')?.focus();
-  }, [view]);
-  const logout = async () => {
-    expire();
-    setChecking(true);
-    try {
-      await api.logout();
-      if (typeof BroadcastChannel !== 'undefined') {
-        const channel = new BroadcastChannel('vaultx-dashboard-session');
-        channel.postMessage('changed');
-        channel.close();
+    if (['authenticated', 'anonymous', 'blocked'].includes(state.phase)) {
+      const heading = document.querySelector<HTMLElement>('main h1');
+      if (heading) {
+        heading.tabIndex = -1;
+        heading.focus();
       }
-      setChecking(false);
-    } catch {
-      setFailure('Sign-out could not be confirmed. Close this browser window and try again.');
-      setChecking(false);
     }
-  };
-  if (checking)
+  }, [state.phase, state.identity?.user.id, view]);
+  const version = auth.version();
+  const expire = useCallback(() => auth.expire(version), [auth, version]);
+  if (['checking', 'login', 'logout'].includes(state.phase))
     return (
       <main className="boot">
         <Loading />
+        {state.phase === 'login' && (
+          <p>Sign-in is pending. Wait for confirmation; do not submit another attempt.</p>
+        )}
+        {state.phase === 'logout' && <p>Signing out. Protected views remain closed.</p>}
       </main>
     );
-  if (failure)
+  if (state.phase === 'blocked')
     return (
       <main className="boot">
-        <Alert>{failure}</Alert>
+        <h1 tabIndex={-1}>Session needs attention</h1>
+        <Alert>{state.error}</Alert>
         <button
           onClick={() => {
-            void check();
+            void auth.check(true);
           }}
         >
           Check session again
         </button>
       </main>
     );
-  if (!identity) return <Login onLogin={check} />;
+  if (state.phase !== 'authenticated' || !state.identity)
+    return <Login onLogin={auth.login} error={state.error} />;
+  const identity = state.identity;
   return (
     <div className="app-shell">
       <a
@@ -633,7 +575,7 @@ export function App() {
             </span>
             <button
               onClick={() => {
-                void logout();
+                void auth.logout();
               }}
             >
               Sign out
