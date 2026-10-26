@@ -1168,3 +1168,82 @@ it('rolls back policy/grant/session invalidation together on a failed withdrawal
     pool.query('DELETE FROM dashboard_memberships WHERE user_id=$1', [user]),
   ).rejects.toMatchObject({ code: '23503' });
 });
+
+it('permits only complete one-way grant revocation at the current statement and policy version', async () => {
+  const before = (
+    await pool.query(
+      `SELECT g.*,m.authorization_version AS member_version FROM membership_permission_grants g
+     JOIN dashboard_memberships m ON m.id=g.membership_id
+     WHERE m.user_id=$1 AND g.permission_code='client.payments.read'`,
+      [user],
+    )
+  ).rows[0]!;
+  const invalid = [
+    'revoked_at=revoked_at',
+    "revocation_reason='withdrawn'",
+    'revocation_policy_version=1',
+    "revoked_at=statement_timestamp(),revocation_reason='withdrawn',revocation_policy_version=NULL",
+    'revoked_at=statement_timestamp(),revocation_reason=NULL,revocation_policy_version=1',
+    "revoked_at=statement_timestamp(),revocation_reason='withdrawn',revocation_policy_version=2",
+    "revoked_at=statement_timestamp()-interval '1 second',revocation_reason='withdrawn',revocation_policy_version=1",
+    "revoked_at=statement_timestamp()+interval '1 second',revocation_reason='withdrawn',revocation_policy_version=1",
+    "source='legacy_viewer'",
+    'created_at=created_at',
+    'id=id',
+    'operator_id=operator_id',
+    'membership_id=membership_id',
+    'permission_code=permission_code',
+    'realm=realm',
+  ];
+  for (const change of invalid) {
+    await expect(
+      policyQuery(pool, operator, `UPDATE membership_permission_grants SET ${change} WHERE id=$1`, [
+        before.id,
+      ]),
+    ).rejects.toThrow();
+  }
+  expect(
+    (await pool.query('SELECT * FROM membership_permission_grants WHERE id=$1', [before.id]))
+      .rows[0],
+  ).toEqual(Object.fromEntries(Object.entries(before).filter(([key]) => key !== 'member_version')));
+  await request(app()).get('/dashboard-api/payments').set('Cookie', session).expect(200);
+  const revoked = await policyQuery(
+    pool,
+    operator,
+    `UPDATE membership_permission_grants SET revoked_at=statement_timestamp(),revocation_reason='withdrawn',
+      revocation_policy_version=(SELECT authorization_version FROM operator_access_policies WHERE operator_id=$2)
+     WHERE id=$1 RETURNING *,revoked_at=statement_timestamp() AS authoritative_timestamp`,
+    [before.id, operator],
+  );
+  expect(revoked.rows[0].authoritative_timestamp).toBe(true);
+  expect(
+    (
+      await pool.query('SELECT authorization_version FROM dashboard_memberships WHERE id=$1', [
+        before.membership_id,
+      ])
+    ).rows[0].authorization_version,
+  ).toBe(before.member_version + 1);
+  await request(app()).get('/dashboard-api/auth/me').set('Cookie', session).expect(401);
+  const fresh = await renewViewerCookie();
+  await request(app()).get('/dashboard-api/payments').set('Cookie', fresh).expect(403);
+  await request(app()).get('/dashboard-api/status').set('Cookie', fresh).expect(200);
+  for (const change of [
+    'revoked_at=NULL,revocation_reason=NULL,revocation_policy_version=NULL',
+    'revoked_at=statement_timestamp()',
+    "revocation_reason='entitlement_withdrawn'",
+    'revocation_policy_version=revocation_policy_version+1',
+    'revocation_policy_version=revocation_policy_version',
+  ]) {
+    await expect(
+      policyQuery(pool, operator, `UPDATE membership_permission_grants SET ${change} WHERE id=$1`, [
+        before.id,
+      ]),
+    ).rejects.toThrow();
+  }
+  const { authoritative_timestamp: _timestamp, ...history } = revoked.rows[0];
+  expect(_timestamp).toBe(true);
+  expect(
+    (await pool.query('SELECT * FROM membership_permission_grants WHERE id=$1', [before.id]))
+      .rows[0],
+  ).toEqual(history);
+});

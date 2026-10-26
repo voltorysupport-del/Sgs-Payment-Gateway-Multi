@@ -966,3 +966,91 @@ it.each(['withdrawal-first', 'login-first'])(
     }
   },
 );
+
+// Stop an ordered policy writer immediately BEFORE its session locks. Actual
+// session-only endpoints must finish while it holds every identity/grant lock.
+// A hidden FK/reverse lock dependency would time out instead of completing.
+for (const action of ['csrf', 'logout'] as const) {
+  for (const mutation of ['entitlement', 'membership', 'user'] as const) {
+    it(`${action} has no reverse identity/gate dependency during ${mutation} withdrawal`, async () => {
+      const authenticated = await login(undefined, 200);
+      const authCookie = cookie(authenticated);
+      const holder = await pool.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query("SET LOCAL statement_timeout='5000ms'; SET LOCAL lock_timeout='2000ms'");
+        await holder.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended('vaultx.viewer.policy:' || $1::uuid::text,0))",
+          [operator],
+        );
+        await holder.query(
+          'SELECT operator_id FROM operator_access_policies WHERE operator_id=$1 FOR UPDATE',
+          [operator],
+        );
+        await holder.query('SELECT id FROM dashboard_users WHERE id=$1 FOR UPDATE', [user]);
+        await holder.query('SELECT id FROM dashboard_memberships WHERE user_id=$1 FOR UPDATE', [
+          user,
+        ]);
+        await holder.query('SELECT id FROM operators WHERE id=$1 FOR UPDATE', [operator]);
+        await holder.query(
+          'SELECT id FROM membership_permission_grants WHERE operator_id=$1 ORDER BY membership_id,permission_code,id FOR UPDATE',
+          [operator],
+        );
+        const req =
+          action === 'csrf'
+            ? request(app()).get('/dashboard-api/auth/csrf').set('Cookie', authCookie)
+            : request(app())
+                .post('/dashboard-api/auth/logout')
+                .set('Cookie', authCookie)
+                .set('Origin', origin)
+                .set('X-CSRF-Token', (authenticated.body as { csrfToken: string }).csrfToken);
+        await req.timeout({ deadline: 2000 }).expect(action === 'csrf' ? 200 : 204);
+        // Now finish the same policy transaction, including session invalidation.
+        if (mutation === 'entitlement')
+          await holder.query(
+            "UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code='client.payments.read'",
+            [operator],
+          );
+        else if (mutation === 'membership')
+          await holder.query(
+            "UPDATE dashboard_memberships SET status='disabled' WHERE user_id=$1",
+            [user],
+          );
+        else await holder.query("UPDATE dashboard_users SET status='disabled' WHERE id=$1", [user]);
+        await holder.query('COMMIT');
+        await request(app()).get('/dashboard-api/auth/me').set('Cookie', authCookie).expect(401);
+      } finally {
+        await holder.query('ROLLBACK');
+        holder.release();
+      }
+    });
+  }
+}
+
+it('cleanup skips a session held by the ordered policy writer and never waits for its gate', async () => {
+  const authenticated = await login(undefined, 200);
+  const hash = createHash('sha256').update(cookie(authenticated).split('=')[1]!).digest('hex');
+  await pool.query(
+    "UPDATE dashboard_sessions SET last_seen_at=clock_timestamp()-interval '31 minutes' WHERE token_hash=$1",
+    [hash],
+  );
+  const holder = await pool.connect();
+  try {
+    await holder.query('BEGIN');
+    await lockPolicyRows(holder, operator); // Includes the expired session row.
+    await cleanupDashboardAuth(pool); // Must SKIP LOCKED, not wait or acquire identity locks.
+    expect(
+      (await holder.query('SELECT token_hash FROM dashboard_sessions WHERE token_hash=$1', [hash]))
+        .rowCount,
+    ).toBe(1);
+    await holder.query('COMMIT');
+    await cleanupDashboardAuth(pool);
+    expect(
+      (await pool.query('SELECT token_hash FROM dashboard_sessions WHERE token_hash=$1', [hash]))
+        .rowCount,
+    ).toBe(0);
+  } finally {
+    await holder.query('ROLLBACK');
+    holder.release();
+  }
+});

@@ -85,6 +85,14 @@ BEGIN
  IF (NEW.id,NEW.membership_id,NEW.operator_id,NEW.permission_code,NEW.realm,NEW.source,NEW.created_at)
   IS DISTINCT FROM (OLD.id,OLD.membership_id,OLD.operator_id,OLD.permission_code,OLD.realm,OLD.source,OLD.created_at)
   OR OLD.revoked_at IS NOT NULL THEN RAISE EXCEPTION 'Viewer grant is immutable'; END IF;
+ -- The sole UPDATE transition is complete, one-way revocation at this statement
+ -- and the currently locked policy revision. No no-op or caller-chosen history.
+ IF NEW.revoked_at IS DISTINCT FROM pg_catalog.statement_timestamp()
+  OR NEW.revocation_reason IS NULL
+  OR NEW.revocation_policy_version IS NULL
+  OR NEW.revocation_policy_version IS DISTINCT FROM
+   (SELECT authorization_version FROM public.operator_access_policies WHERE operator_id=OLD.operator_id)
+ THEN RAISE EXCEPTION 'Viewer revocation transition refused'; END IF;
  RETURN NEW;
 END; $$;
 CREATE TRIGGER viewer_grant_guard BEFORE UPDATE ON public.membership_permission_grants FOR EACH ROW EXECUTE FUNCTION public.guard_viewer_grant();
@@ -113,7 +121,7 @@ END; $$;
 CREATE FUNCTION public.revoke_disabled_viewer_grants() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER
  SET search_path=pg_catalog,public,pg_temp AS $$
 BEGIN
- UPDATE public.membership_permission_grants SET revoked_at=clock_timestamp(),revocation_reason='membership_disabled',
+ UPDATE public.membership_permission_grants SET revoked_at=statement_timestamp(),revocation_reason='membership_disabled',
   revocation_policy_version=(SELECT authorization_version FROM public.operator_access_policies WHERE operator_id=NEW.operator_id)
   WHERE membership_id=NEW.id AND revoked_at IS NULL;
  RETURN NEW;
@@ -132,7 +140,7 @@ BEGIN
    WHERE operator_id=OLD.operator_id RETURNING authorization_version INTO revision;
   IF revision IS NULL THEN RAISE EXCEPTION 'Viewer policy missing'; END IF;
   IF NOT NEW.enabled THEN
-   UPDATE public.membership_permission_grants SET revoked_at=clock_timestamp(),revocation_reason='entitlement_withdrawn',revocation_policy_version=revision
+   UPDATE public.membership_permission_grants SET revoked_at=statement_timestamp(),revocation_reason='entitlement_withdrawn',revocation_policy_version=revision
     WHERE operator_id=OLD.operator_id AND permission_code=OLD.permission_code AND revoked_at IS NULL;
    UPDATE public.dashboard_memberships SET authorization_version=authorization_version+1 WHERE operator_id=OLD.operator_id;
   END IF;
@@ -166,7 +174,7 @@ BEGIN
   PERFORM public.require_viewer_policy_gate(OLD.id);
   UPDATE public.operator_access_policies SET authorization_version=authorization_version+1,updated_at=clock_timestamp() WHERE operator_id=OLD.id;
   IF NEW.status='suspended' THEN
-   UPDATE public.membership_permission_grants SET revoked_at=clock_timestamp(),revocation_reason='operator_suspended',
+   UPDATE public.membership_permission_grants SET revoked_at=statement_timestamp(),revocation_reason='operator_suspended',
     revocation_policy_version=(SELECT authorization_version FROM public.operator_access_policies WHERE operator_id=OLD.id)
     WHERE operator_id=OLD.id AND revoked_at IS NULL;
   END IF;
