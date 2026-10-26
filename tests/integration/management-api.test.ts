@@ -12,6 +12,7 @@ import {
   seedViewerFixture,
   cleanupViewerFixture,
   insertViewerSession,
+  lockPolicyRows,
 } from '../viewer-policy-fixtures.js';
 
 let pool: Pool;
@@ -253,4 +254,172 @@ it('rotates owner CSRF and logs out without exposing or retaining owner authenti
   ).toBe(0);
   expect(captured.output()).not.toContain(owner.token);
   expect(captured.output()).not.toContain(machineKey);
+});
+
+it('uses exactly one management revision for a combined metadata/status PATCH and rejects its stale replay', async () => {
+  const response = await change({
+    expectedVersion: 1,
+    name: 'Combined synthetic change',
+    status: 'suspended',
+  }).expect(200);
+  expect(response.body.operator).toMatchObject({
+    id: operator,
+    name: 'Combined synthetic change',
+    status: 'suspended',
+    version: 2,
+  });
+  expect(
+    (
+      await pool.query<{ management_version: number }>(
+        'SELECT management_version FROM operators WHERE id=$1',
+        [operator],
+      )
+    ).rows[0]!.management_version,
+  ).toBe(2);
+  await change({
+    expectedVersion: 1,
+    name: 'Combined synthetic change',
+    status: 'suspended',
+  }).expect(409);
+  const events = await pool.query<{ target_version: number; summary: { version: number } }>(
+    "SELECT target_version,summary FROM management_audit WHERE operator_id=$1 AND action='operators.update'",
+    [operator],
+  );
+  expect(events.rows).toHaveLength(1);
+  expect(events.rows[0]).toMatchObject({ target_version: 2, summary: { version: 2 } });
+});
+
+it('consumes exactly one management revision for an authorized metadata no-op', async () => {
+  const response = await change({ expectedVersion: 1, name: 'HTTP management synthetic' }).expect(
+    200,
+  );
+  expect(response.body.operator).toMatchObject({
+    id: operator,
+    name: 'HTTP management synthetic',
+    status: 'active',
+    version: 2,
+  });
+  await change({ expectedVersion: 1, name: 'HTTP management synthetic' }).expect(409);
+  const events = await pool.query<{
+    target_version: number;
+    summary: { version: number; nameChanged: boolean };
+  }>(
+    "SELECT target_version,summary FROM management_audit WHERE operator_id=$1 AND action='operators.update'",
+    [operator],
+  );
+  expect(events.rows).toHaveLength(1);
+  expect(events.rows[0]).toMatchObject({
+    target_version: 2,
+    summary: { version: 2 },
+  });
+});
+
+it('keeps management revision and entitlement policy revision independent in withdrawal results and audit evidence', async () => {
+  for (let version = 1; version <= 3; version++) {
+    const response = await change({
+      expectedVersion: version,
+      name: 'Synthetic metadata revision ' + version,
+    }).expect(200);
+    expect(response.body.operator.version).toBe(version + 1);
+  }
+  const before = (
+    await pool.query<{ authorization_version: number }>(
+      'SELECT authorization_version FROM operator_access_policies WHERE operator_id=$1',
+      [operator],
+    )
+  ).rows[0]!.authorization_version;
+  const response = await request(app())
+    .post('/owner-api/clients/' + operator + '/entitlements/client.payments.read/withdraw')
+    .set('Host', 'owner.example.invalid')
+    .set('X-Forwarded-Proto', 'https')
+    .set('Cookie', '__Host-vaultx_owner_session=' + owner.token)
+    .set('Origin', origin)
+    .set('X-CSRF-Token', owner.csrf)
+    .send({ expectedVersion: 4 })
+    .expect(200);
+  expect(response.body.operator.version).toBe(5);
+  expect(response.body.policyVersion).toBe(before + 1);
+  const current = await pool.query<{ management_version: number; authorization_version: number }>(
+    'SELECT o.management_version,p.authorization_version FROM operators o JOIN operator_access_policies p ON p.operator_id=o.id WHERE o.id=$1',
+    [operator],
+  );
+  expect(current.rows[0]).toEqual({ management_version: 5, authorization_version: before + 1 });
+  const events = await pool.query<{
+    target_version: number;
+    summary: { version: number; policyVersion: number };
+  }>(
+    "SELECT target_version,summary FROM management_audit WHERE operator_id=$1 AND action='entitlements.withdraw'",
+    [operator],
+  );
+  expect(events.rows).toHaveLength(1);
+  expect(events.rows[0]).toMatchObject({
+    target_version: 5,
+    summary: { version: 5, policyVersion: before + 1 },
+  });
+});
+
+it('serializes two owner PATCH requests at the tenant gate and commits one revision with one audit record', async () => {
+  const second = await createOwnerFixture(pool);
+  otherOwners.push(second.id);
+  const holder = await pool.connect();
+  let pending: Promise<request.Response>[] = [];
+  try {
+    await holder.query('BEGIN');
+    await lockPolicyRows(holder, operator);
+    // Distinct owners and session rows ensure the tenant gate, not a shared
+    // session lock, controls this interleaving.
+    pending = [
+      change({ expectedVersion: 1, name: 'Concurrent owner A' }).then((response) => response),
+      change(
+        { expectedVersion: 1, name: 'Concurrent owner B' },
+        '__Host-vaultx_owner_session=' + second.token,
+        second.csrf,
+      ).then((response) => response),
+    ];
+    for (const operation of pending) void operation.catch(() => undefined);
+    let waiting = 0;
+    for (let check = 0; check < 200; check++) {
+      const locks = await holder.query<{ waiting: string }>(
+        `SELECT count(*) AS waiting FROM pg_catalog.pg_locks l
+         CROSS JOIN (SELECT pg_catalog.hashtextextended('vaultx.viewer.policy:' || $1::uuid::text,0) AS key) gate
+         WHERE l.locktype='advisory' AND NOT l.granted AND l.mode='ExclusiveLock' AND l.objsubid=1
+           AND l.database=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database())
+           AND l.classid=((gate.key >> 32) & 4294967295)::oid AND l.objid=(gate.key & 4294967295)::oid`,
+        [operator],
+      );
+      waiting = Number(locks.rows[0]!.waiting);
+      if (waiting === 2) break;
+    }
+    expect(waiting).toBe(2);
+    await holder.query('COMMIT');
+    const responses = await Promise.all(pending);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    const successful = responses.find((response) => response.status === 200)!;
+    expect(successful.body.operator.version).toBe(2);
+    const current = await pool.query<{ management_version: number; name: string }>(
+      'SELECT management_version,name FROM operators WHERE id=$1',
+      [operator],
+    );
+    expect(current.rows[0]).toEqual({
+      management_version: 2,
+      name: successful.body.operator.name as string,
+    });
+    const events = await pool.query<{
+      actor_id: string;
+      target_version: number;
+      summary: { version: number };
+    }>(
+      "SELECT actor_id,target_version,summary FROM management_audit WHERE operator_id=$1 AND action='operators.update'",
+      [operator],
+    );
+    expect(events.rows).toHaveLength(1);
+    expect(events.rows[0]).toMatchObject({ target_version: 2, summary: { version: 2 } });
+    const winningOwner =
+      successful.body.operator.name === 'Concurrent owner A' ? owner.id : second.id;
+    expect(events.rows[0]!.actor_id).toBe(winningOwner);
+  } finally {
+    await holder.query('ROLLBACK');
+    holder.release();
+    await Promise.allSettled(pending);
+  }
 });
