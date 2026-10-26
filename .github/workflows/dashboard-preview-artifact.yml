@@ -1,0 +1,48 @@
+name: Deliver existing dashboard preview
+
+on:
+  push:
+    branches: ['feature/local-dashboard-preview']
+    paths:
+      - 'preview-artifacts/vaultx-dashboard-preview.zip'
+      - '.github/workflows/dashboard-preview-artifact.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    name: Verify and upload unchanged preview ZIP
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify existing ZIP integrity and checksum
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import zipfile
+          from pathlib import Path
+          package = Path('preview-artifacts/vaultx-dashboard-preview.zip')
+          expected = 'a6e638d794a845a375d7b746b47472f597ef5b78dc629c7e622f5deb2e355089'
+          assert package.stat().st_size == 25271, 'Unexpected package size'
+          assert hashlib.sha256(package.read_bytes()).hexdigest() == expected, 'Checksum mismatch'
+          with zipfile.ZipFile(package) as archive:
+              assert archive.testzip() is None, 'ZIP integrity failure'
+              assert len(archive.namelist()) == 11, 'Unexpected package contents'
+              for name in ['Preview-Dashboard.cmd', 'START-HERE.md', 'scripts/preview-dashboard.mjs', 'frontend/src/main.tsx', 'package-lock.json']:
+                  assert 'VaultX-Dashboard-Preview/' + name in archive.namelist(), 'Missing required file'
+          print('PASS: original 25,271-byte ZIP; 11 files; SHA-256 ' + expected)
+          PY
+
+      - name: Upload existing ZIP without rebuilding
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaultx-dashboard-preview-download
+          path: preview-artifacts/vaultx-dashboard-preview.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
