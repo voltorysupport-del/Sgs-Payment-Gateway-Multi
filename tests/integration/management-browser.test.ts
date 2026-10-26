@@ -40,6 +40,10 @@ it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
         'Synthetic owner browser client',
         code,
       ]);
+      // Existing, initialized tenant policy; no policy repair occurs in the API.
+      await pool.query('INSERT INTO public.operator_access_policies(operator_id) VALUES($1)', [
+        operator,
+      ]);
       const owner = await createOwnerFixture(pool);
       ownerId = owner.id;
       execFileSync(
@@ -151,6 +155,9 @@ it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
       await browser?.close();
       if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
       if (ownerId) await cleanupOwnerFixture(pool, ownerId);
+      await pool.query('DELETE FROM public.operator_access_policies WHERE operator_id=$1', [
+        operator,
+      ]);
       await pool.query('DELETE FROM public.operators WHERE id=$1', [operator]);
       await pool.end();
       await rm(directory, { recursive: true, force: true });
