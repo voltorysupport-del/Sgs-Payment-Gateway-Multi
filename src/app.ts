@@ -7,6 +7,7 @@ import { pinoHttp } from 'pino-http';
 import type { Pool } from 'pg';
 import type { Config } from './config/index.js';
 import { assertRealPaymentsDisabled } from './config/safety.js';
+import { createManagementRouter } from './management/routes.js';
 import { createDashboardFrontend } from './dashboard/frontend.js';
 import { createDashboardBff } from './dashboard/bff.js';
 import { createDashboardAuthRouter } from './dashboard/routes.js';
@@ -28,7 +29,8 @@ export function createApp({ config, logger, pool }: AppDependencies): Express {
   const app = express();
   app.disable('x-powered-by');
   // Trust only independently verified proxy addresses; never trust hop counts or all proxies.
-  if (config.dashboardEnabled) app.set('trust proxy', [...config.dashboardTrustedProxies]);
+  if (config.dashboardEnabled || config.ownerEnabled)
+    app.set('trust proxy', [...config.dashboardTrustedProxies]);
   app.use(helmet());
 
   app.use(
@@ -56,6 +58,8 @@ export function createApp({ config, logger, pool }: AppDependencies): Express {
       },
     }),
   );
+
+  if (config.ownerEnabled) app.use('/owner-api', createManagementRouter(pool, config));
 
   if (config.dashboardEnabled)
     app.use('/dashboard-api/auth', createDashboardAuthRouter(pool, config));

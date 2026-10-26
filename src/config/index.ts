@@ -31,6 +31,22 @@ const booleanFlag = (name: string) =>
 
 const envSchema = z
   .object({
+    OWNER_ENABLED: booleanFlag('OWNER_ENABLED'),
+    OWNER_ORIGIN: z
+      .string()
+      .optional()
+      .refine(
+        (value) => {
+          if (value === undefined) return true;
+          try {
+            const u = new URL(value);
+            return u.protocol === 'https:' && u.origin === value && !u.username && !u.password;
+          } catch {
+            return false;
+          }
+        },
+        { message: 'OWNER_ORIGIN must be an exact HTTPS origin' },
+      ),
     DASHBOARD_ENABLED: booleanFlag('DASHBOARD_ENABLED'),
     DASHBOARD_BFF_ENABLED: booleanFlag('DASHBOARD_BFF_ENABLED'),
     DASHBOARD_OPERATOR_ID: z
@@ -125,6 +141,41 @@ const envSchema = z
     SIMULATOR_CONTROLS_ENABLED: booleanFlag('SIMULATOR_CONTROLS_ENABLED'),
   })
   .superRefine((env, ctx) => {
+    if (env.OWNER_ENABLED) {
+      if (env.NODE_ENV === 'production')
+        ctx.addIssue({
+          code: 'custom',
+          path: ['OWNER_ENABLED'],
+          message:
+            'Owner features are development/test-only pending approved enrollment, MFA, recovery and database deployment policy',
+        });
+      if (!env.OWNER_ORIGIN)
+        ctx.addIssue({
+          code: 'custom',
+          path: ['OWNER_ORIGIN'],
+          message: 'Required when owner foundation is enabled',
+        });
+      if (!env.DASHBOARD_PUBLIC_ORIGIN)
+        ctx.addIssue({
+          code: 'custom',
+          path: ['DASHBOARD_PUBLIC_ORIGIN'],
+          message: 'Required to establish separate client and owner realms',
+        });
+      try {
+        if (
+          env.OWNER_ORIGIN &&
+          env.DASHBOARD_PUBLIC_ORIGIN &&
+          new URL(env.OWNER_ORIGIN).hostname === new URL(env.DASHBOARD_PUBLIC_ORIGIN).hostname
+        )
+          ctx.addIssue({
+            code: 'custom',
+            path: ['OWNER_ORIGIN'],
+            message: 'Owner and client realms require separate hostnames',
+          });
+      } catch {
+        /* Field validators report malformed origins without echoing them. */
+      }
+    }
     if (env.DASHBOARD_BFF_ENABLED) {
       if (!env.DASHBOARD_ENABLED)
         ctx.addIssue({
@@ -161,6 +212,8 @@ const envSchema = z
   });
 
 export interface Config {
+  readonly ownerEnabled: boolean;
+  readonly ownerOrigin: string | undefined;
   readonly dashboardBffEnabled: boolean;
   readonly dashboardOperatorId: string | undefined;
   readonly dashboardReadOnlyApiKey: string | undefined;
@@ -209,6 +262,8 @@ export function loadConfig(env: EnvSource = process.env): Config {
   const parsed = result.data;
 
   return Object.freeze({
+    ownerEnabled: parsed.OWNER_ENABLED,
+    ownerOrigin: parsed.OWNER_ORIGIN,
     dashboardEnabled: parsed.DASHBOARD_ENABLED,
     dashboardBffEnabled: parsed.DASHBOARD_BFF_ENABLED,
     dashboardOperatorId: parsed.DASHBOARD_OPERATOR_ID,
