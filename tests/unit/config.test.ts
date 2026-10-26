@@ -140,3 +140,31 @@ describe('assertRealPaymentsDisabled (second, independent safety check)', () => 
     expect(() => assertRealPaymentsDisabled(unsafe)).toThrow(UnsafeConfigurationError);
   });
 });
+
+describe('owner foundation configuration boundary', () => {
+  const owner = {
+    ...VALID_ENV,
+    OWNER_ENABLED: 'true',
+    OWNER_ORIGIN: 'https://owners.example.invalid',
+    DASHBOARD_PUBLIC_ORIGIN: 'https://clients.example.invalid',
+  };
+  it('defaults owner authority off', () => {
+    expect(loadConfig(VALID_ENV).ownerEnabled).toBe(false);
+  });
+  it('permits explicitly separated synthetic development/test realms only', () => {
+    expect(loadConfig(owner).ownerEnabled).toBe(true);
+  });
+  it('rejects production enablement pending reviewed ceremonies and deployment controls', () => {
+    expect(() => loadConfig({ ...owner, NODE_ENV: 'production' })).toThrow(ConfigError);
+  });
+  it('rejects missing origins and same-host cookie realms including different ports', () => {
+    for (const env of [
+      { ...owner, OWNER_ORIGIN: undefined },
+      { ...owner, DASHBOARD_PUBLIC_ORIGIN: undefined },
+      { ...owner, OWNER_ORIGIN: 'https://clients.example.invalid:444' },
+      { ...owner, OWNER_ORIGIN: 'http://owners.example.invalid' },
+      { ...owner, OWNER_ORIGIN: 'not a URL' },
+    ])
+      expect(() => loadConfig(env)).toThrow(ConfigError);
+  });
+});
