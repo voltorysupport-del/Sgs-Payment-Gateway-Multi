@@ -9,6 +9,7 @@ import { UnsafeConfigurationError } from '../../src/config/safety.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { createOperatorWithApiKey, revokeOperatorKey } from '../../src/db/operator-keys.js';
 import { captureLogger, testConfig } from '../helpers.js';
+import { policyQuery } from '../viewer-policy-fixtures.js';
 import { openTestDatabase } from '../test-database.js';
 
 const config = testConfig();
@@ -401,7 +402,12 @@ describe('simulated payment lifecycle', () => {
       if (kind === 'unknown') credential = `vxp_${'0'.repeat(64)}`;
       if (kind === 'revoked') await revokeOperatorKey(pool, keyId, operatorId);
       if (kind === 'suspended')
-        await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operatorId]);
+        await policyQuery(
+          pool,
+          operatorId,
+          "UPDATE operators SET status = 'suspended' WHERE id = $1",
+          [operatorId],
+        );
       expect((await create(randomUUID(), credential)).status).toBe(401);
       expect((await retrieve(created.body.id, credential)).status).toBe(401);
       expect((await simulate(created.body.id, 'succeeded', credential)).status).toBe(401);
@@ -599,13 +605,17 @@ describe('read-only operator payment history', () => {
         .expect(400);
     }
     await request(app).get('/payments').expect(401);
-    await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operatorId]);
+    await policyQuery(pool, operatorId, "UPDATE operators SET status = 'suspended' WHERE id = $1", [
+      operatorId,
+    ]);
     await request(app).get('/payments').auth(apiKey, { type: 'bearer' }).expect(401);
     await request(app)
       .get('/payments/' + created.body.id)
       .auth(apiKey, { type: 'bearer' })
       .expect(401);
-    await pool.query("UPDATE operators SET status = 'active' WHERE id = $1", [operatorId]);
+    await policyQuery(pool, operatorId, "UPDATE operators SET status = 'active' WHERE id = $1", [
+      operatorId,
+    ]);
     await revokeOperatorKey(pool, keyId, operatorId);
     await request(app).get('/payments').auth(apiKey, { type: 'bearer' }).expect(401);
   });

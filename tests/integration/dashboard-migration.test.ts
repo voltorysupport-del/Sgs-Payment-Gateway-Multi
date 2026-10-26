@@ -306,6 +306,161 @@ it('upgrades populated 004 to 005 atomically, preserving verifiers and viewer id
   }
 });
 
+it('upgrades populated viewer schema 005 to management 006 without promoting identities and rolls back on failure', async () => {
+  const pool = await openUpgradeDatabase();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const names = [
+      '001_initial_schema',
+      '002_operator_api_keys',
+      '003_api_key_permissions',
+      '004_dashboard_auth',
+    ];
+    await client.query(
+      'CREATE TABLE public.schema_migrations(name TEXT PRIMARY KEY,applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())',
+    );
+    for (const name of names) {
+      await client.query(
+        await readFile(new URL('../../migrations/' + name + '.sql', import.meta.url), 'utf8'),
+      );
+      await client.query('INSERT INTO schema_migrations(name) VALUES($1)', [name + '.sql']);
+    }
+    const op = randomUUID(),
+      user = randomUUID(),
+      member = randomUUID(),
+      payment = randomUUID(),
+      key = generateOperatorApiKey();
+    await client.query("INSERT INTO operators(id,name,code) VALUES($1,'Existing client',$2)", [
+      op,
+      'upgrade_' + op,
+    ]);
+    await client.query(
+      "INSERT INTO dashboard_users(id,username,password_hash) VALUES($1,$2,'unchanged-synthetic-verifier')",
+      [user, 'user_' + user],
+    );
+    await client.query(
+      'INSERT INTO dashboard_memberships(id,user_id,operator_id) VALUES($1,$2,$3)',
+      [member, user, op],
+    );
+    await client.query(
+      "INSERT INTO operator_api_keys(id,operator_id,name,key_hash,permission) VALUES($1,$2,'Existing',$3,'read_only')",
+      [randomUUID(), op, key.keyHash],
+    );
+    await client.query(
+      "INSERT INTO payments(id,operator_id,amount_minor,currency,idempotency_key) VALUES($1,$2,100,'EUR',$3)",
+      [payment, op, randomUUID()],
+    );
+    await client.query(
+      await readFile(
+        new URL('../../migrations/005_viewer_permissions.sql', import.meta.url),
+        'utf8',
+      ),
+    );
+    await client.query("INSERT INTO schema_migrations(name) VALUES('005_viewer_permissions.sql')");
+    const snapshot = async () => ({
+      users: (await client.query('SELECT * FROM dashboard_users ORDER BY id')).rows,
+      members: (await client.query('SELECT * FROM dashboard_memberships ORDER BY id')).rows,
+      grants: (await client.query('SELECT * FROM membership_permission_grants ORDER BY id')).rows,
+      keys: (await client.query('SELECT * FROM operator_api_keys ORDER BY id')).rows,
+      payments: (await client.query('SELECT * FROM payments ORDER BY id')).rows,
+    });
+    const before = await snapshot();
+    const migration = await readFile(
+      new URL('../../migrations/006_management_foundation.sql', import.meta.url),
+      'utf8',
+    );
+    await client.query('SAVEPOINT before_management');
+    await client.query(migration);
+    await client.query(
+      "INSERT INTO schema_migrations(name) VALUES('006_management_foundation.sql')",
+    );
+    await expect(client.query('SELECT 1/0')).rejects.toThrow();
+    await client.query('ROLLBACK TO SAVEPOINT before_management');
+    expect(
+      (await client.query("SELECT to_regclass('public.owner_principals') AS name")).rows[0].name,
+    ).toBeNull();
+    expect(
+      (
+        await client.query(
+          "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='operators' AND column_name='management_version'",
+        )
+      ).rowCount,
+    ).toBe(0);
+    expect(
+      (
+        await client.query(
+          "SELECT name FROM schema_migrations WHERE name='006_management_foundation.sql'",
+        )
+      ).rowCount,
+    ).toBe(0);
+    expect(await snapshot()).toEqual(before);
+    await client.query(migration);
+    expect(await snapshot()).toEqual(before);
+    expect(
+      (await client.query('SELECT management_version FROM operators WHERE id=$1', [op])).rows[0]
+        .management_version,
+    ).toBe(1);
+    for (const table of [
+      'owner_principals',
+      'owner_permission_grants',
+      'owner_sessions',
+      'management_audit',
+    ])
+      expect(
+        (await client.query(`SELECT count(*)::int AS count FROM public.${table}`)).rows[0].count,
+      ).toBe(0);
+    expect(
+      (
+        await client.query<{ code: string }>(
+          'SELECT code FROM owner_permission_catalog ORDER BY code',
+        )
+      ).rows.map((r) => r.code),
+    ).toEqual(['platform.audit.read', 'platform.clients.manage', 'platform.clients.read']);
+    expect((await client.query('SELECT role FROM dashboard_memberships')).rows).toEqual([
+      { role: 'viewer' },
+    ]);
+    // The installed 006 trigger rejects unguarded legacy metadata writes.
+    await client.query('SAVEPOINT ungated_revision');
+    await expect(
+      client.query("UPDATE operators SET name='Not authorized' WHERE id=$1", [op]),
+    ).rejects.toMatchObject({ code: '42501' });
+    await client.query('ROLLBACK TO SAVEPOINT ungated_revision');
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended('vaultx.viewer.policy:' || $1::uuid::text,0))",
+      [op],
+    );
+    await client.query(
+      'SELECT operator_id FROM operator_access_policies WHERE operator_id=$1 FOR UPDATE',
+      [op],
+    );
+    await client.query('SELECT id FROM dashboard_users WHERE id=$1 FOR UPDATE', [user]);
+    await client.query('SELECT id FROM dashboard_memberships WHERE id=$1 FOR UPDATE', [member]);
+    await client.query('SELECT id FROM operators WHERE id=$1 FOR UPDATE', [op]);
+    await client.query(
+      'SELECT id FROM membership_permission_grants WHERE operator_id=$1 ORDER BY membership_id,permission_code,id FOR UPDATE',
+      [op],
+    );
+    const updated = await client.query(
+      "UPDATE operators SET name='Reviewed legacy update',management_version=management_version+1 WHERE id=$1 RETURNING management_version",
+      [op],
+    );
+    expect(updated.rows[0].management_version).toBe(2); // Never 3 from competing increments.
+    expect(
+      (
+        await client.query(
+          'UPDATE operators SET name=name,management_version=management_version+1 WHERE id=$1 RETURNING management_version',
+          [op],
+        )
+      ).rows[0].management_version,
+    ).toBe(3);
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+    await pool.end();
+  }
+});
+
 it(
   'serializes concurrent migration bootstrap, applies each file once and still propagates real SQL failures',
   { timeout: 20_000 },
@@ -350,6 +505,7 @@ it(
         '003_api_key_permissions.sql',
         '004_dashboard_auth.sql',
         '005_viewer_permissions.sql',
+        '006_management_foundation.sql',
       ]);
       await Promise.all(peers.map((peer) => runMigrations(peer)));
       expect(

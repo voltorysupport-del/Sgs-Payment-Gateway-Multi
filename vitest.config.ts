@@ -19,7 +19,26 @@ export default defineConfig({
           ...backend,
           name: 'backend',
           include: ['tests/**/*.test.ts'],
-          exclude: ['tests/integration/dashboard-browser.test.ts'],
+          exclude: [
+            'tests/integration/dashboard-browser.test.ts',
+            'tests/integration/management-browser.test.ts',
+            'tests/integration/management-domain.test.ts',
+            'tests/integration/management-api.test.ts',
+          ],
+        },
+      },
+      {
+        test: {
+          ...backend,
+          name: 'management',
+          include: [
+            'tests/integration/management-domain.test.ts',
+            'tests/integration/management-api.test.ts',
+          ],
+          // Owner-policy invalidation intentionally affects every owner fixture.
+          // Explicit intra-test barriers exercise concurrency without unrelated
+          // fixture issuers racing global invalidation/immutable-audit teardown.
+          fileParallelism: false,
         },
       },
       {
@@ -36,7 +55,10 @@ export default defineConfig({
         test: {
           ...backend,
           name: 'browser',
-          include: ['tests/integration/dashboard-browser.test.ts'],
+          include: [
+            'tests/integration/dashboard-browser.test.ts',
+            'tests/integration/management-browser.test.ts',
+          ],
           sequence: { groupOrder: 1 },
         },
       },

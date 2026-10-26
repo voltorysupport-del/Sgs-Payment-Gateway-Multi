@@ -29,6 +29,32 @@ let code: string;
 let directory: string;
 let env: Record<string, string | undefined>;
 
+// Deliberate fixture corruption/lifecycle changes on this independently verified
+// disposable staging-named pool, not a production maintenance entry point.
+async function mutateMachineOnlyFixture(operator: string, sql: string, values: unknown[]) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended('vaultx.viewer.policy:' || $1::uuid::text,0))",
+      [operator],
+    );
+    const policy = await client.query(
+      'SELECT operator_id FROM operator_access_policies WHERE operator_id=$1',
+      [operator],
+    );
+    if (policy.rowCount) throw new Error('Expected a machine-only disposable fixture');
+    await client.query('SELECT id FROM operators WHERE id=$1 FOR UPDATE', [operator]);
+    await client.query(sql, values);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 beforeAll(async () => {
   // The only source of connection settings is the independently verified
   // disposable test cluster. No application DATABASE_URL is consulted here.
@@ -329,7 +355,7 @@ describe('staging provisioning on disposable PostgreSQL only', { timeout: 30_000
     const key = await issue();
     expect((await cli('revoke', ['--key-id', randomUUID()])).status).toBe(1);
     expect((await authenticateOperatorKey(pool, key.apiKey))?.id).toBe(key.operatorId);
-    await pool.query('UPDATE operators SET name = $2 WHERE id = $1', [
+    await mutateMachineOnlyFixture(key.operatorId, 'UPDATE operators SET name = $2 WHERE id = $1', [
       key.operatorId,
       'Existing unrelated operator',
     ]);
@@ -341,7 +367,11 @@ describe('staging provisioning on disposable PostgreSQL only', { timeout: 30_000
 
   it('refuses a suspended staging operator', async () => {
     const key = await issue();
-    await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [key.operatorId]);
+    await mutateMachineOnlyFixture(
+      key.operatorId,
+      "UPDATE operators SET status = 'suspended' WHERE id = $1",
+      [key.operatorId],
+    );
     expect(
       (
         await cli('rotate', [
