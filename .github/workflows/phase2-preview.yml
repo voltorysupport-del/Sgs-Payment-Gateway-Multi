@@ -1,0 +1,116 @@
+name: Phase 2 isolated three-level preview
+on:
+  push:
+    branches: [feature/phase2-local-preview]
+    paths:
+      - 'local-preview-phase2/**'
+      - 'scripts/package-phase2-preview.py'
+      - '.github/workflows/phase2-preview.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: phase2-preview-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  LIVE_MODE_ENABLED: 'false'
+  ALLOWED_PROVIDERS: simulator
+  DASHBOARD_ENABLED: 'false'
+  DASHBOARD_BFF_ENABLED: 'false'
+  DATABASE_URL: ''
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Package isolated source; no application build or gateway configuration
+        run: python scripts/package-phase2-preview.py "$RUNNER_TEMP/package"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phase2-preview-candidate
+          path: |
+            ${{ runner.temp }}/package/vaultx-pay-phase2-preview.zip
+            ${{ runner.temp }}/package/vaultx-pay-phase2-preview.zip.sha256
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+  validate:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: phase2-preview-candidate
+          path: candidate
+      - name: Verify archive checksum and exact safe paths before extraction
+        run: |
+          cd candidate
+          sha256sum -c vaultx-pay-phase2-preview.zip.sha256
+          python - <<'PY'
+          import zipfile
+          from pathlib import PurePosixPath
+          with zipfile.ZipFile('vaultx-pay-phase2-preview.zip') as archive:
+              assert archive.testzip() is None
+              assert len(archive.namelist()) == 14
+              for name in archive.namelist():
+                  path = PurePosixPath(name)
+                  assert not path.is_absolute() and '..' not in path.parts
+                  assert path.parts[0] == 'VaultX-Pay-Phase2-Preview'
+              archive.extractall('extracted')
+          PY
+      - name: Node 24, package integrity, synthetic HTTP security and actual native launcher
+        working-directory: candidate/extracted/VaultX-Pay-Phase2-Preview
+        run: |
+          node scripts/verify.mjs
+          node --test tests/smoke.test.mjs tests/integrity.test.mjs
+          node tests/launcher-smoke.mjs
+      - name: Install browser test tools outside runtime package
+        run: |
+          npm install --prefix "$RUNNER_TEMP/phase2-browser-tools" --ignore-scripts --no-audit --no-fund playwright@1.64.1
+          node "$RUNNER_TEMP/phase2-browser-tools/node_modules/playwright/cli.js" install chromium
+      - name: Browser role workflow, permission revocation, mobile and external-network rejection
+        working-directory: candidate/extracted/VaultX-Pay-Phase2-Preview
+        env:
+          VAULTX_PREVIEW_BROWSER_TOOLS: ${{ runner.temp }}/phase2-browser-tools
+        run: node tests/browser-smoke.mjs
+      - name: Reverify package and ZIP remain unchanged after execution
+        run: |
+          node candidate/extracted/VaultX-Pay-Phase2-Preview/scripts/verify.mjs
+          cd candidate
+          sha256sum -c vaultx-pay-phase2-preview.zip.sha256
+  publish-verified-preview:
+    needs: [package, validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: phase2-preview-candidate
+          path: verified
+      - name: Verify unchanged tested ZIP
+        working-directory: verified
+        run: sha256sum -c vaultx-pay-phase2-preview.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vaultx-pay-phase2-preview-windows-download
+          path: |
+            verified/vaultx-pay-phase2-preview.zip
+            verified/vaultx-pay-phase2-preview.zip.sha256
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error

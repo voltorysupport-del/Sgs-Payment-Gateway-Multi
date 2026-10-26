@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>VaultX Pay · PSP Demonstration</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div class="demo-note" role="note">
+      <strong>SIMULATED · LOCAL DISPOSABLE PREVIEW</strong
+      ><span
+        >No real authentication, credentials, money, gateway, email or database. All accounts, MFA
+        and financial figures are synthetic.</span
+      >
+    </div>
+    <div class="layout">
+      <aside>
+        <a class="brand" href="/">◇ VaultX <span>Pay</span></a>
+        <p class="eyebrow">PAYMENT INFRASTRUCTURE</p>
+        <nav id="navigation" aria-label="Workspace navigation"></nav>
+        <footer>SIMULATOR ONLY<br />127.0.0.1 · In-memory state</footer>
+      </aside>
+      <div>
+        <header>
+          <div>
+            <div class="eyebrow">VAULTX PAY / DEMO WORKSPACE</div>
+            <p id="identity">Choose a synthetic account</p>
+          </div>
+          <button id="switch">Switch demo account</button>
+        </header>
+        <main id="content" tabindex="-1"></main>
+        <div id="message" role="status" aria-live="polite"></div>
+      </div>
+    </div>
+  </body>
+</html>
