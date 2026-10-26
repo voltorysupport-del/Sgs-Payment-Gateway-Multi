@@ -255,10 +255,10 @@ try {
     '--username=vaultx_test',
     '--dbname=vaultx_pay_test',
     '--set=ON_ERROR_STOP=1',
-    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments), (SELECT count(*) FROM dashboard_users), (SELECT count(*) FROM dashboard_memberships), (SELECT count(*) FROM dashboard_sessions), (SELECT count(*) FROM dashboard_login_limits), (SELECT count(*) FROM operator_access_policies), (SELECT count(*) FROM operator_permission_entitlements), (SELECT count(*) FROM membership_permission_grants), (SELECT count(*) FROM owner_principals), (SELECT count(*) FROM owner_permission_grants), (SELECT count(*) FROM owner_sessions), (SELECT count(*) FROM management_audit); ROLLBACK;',
+    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments), (SELECT count(*) FROM dashboard_users), (SELECT count(*) FROM dashboard_memberships), (SELECT count(*) FROM dashboard_sessions), (SELECT count(*) FROM dashboard_login_limits), (SELECT count(*) FROM operator_access_policies), (SELECT count(*) FROM operator_permission_entitlements), (SELECT count(*) FROM membership_permission_grants), (SELECT count(*) FROM owner_principals), (SELECT count(*) FROM owner_permission_grants), (SELECT count(*) FROM owner_sessions), (SELECT count(*) FROM management_audit), (SELECT count(*) FROM merchant_member_profiles), (SELECT count(*) FROM merchant_terminals), (SELECT count(*) FROM merchant_invitations), (SELECT count(*) FROM merchant_audit); ROLLBACK;',
   ]);
-  if (remaining !== '6|0|0|0|0|0|0|0|0|0|0|0|0|0|0') {
-    throw new Error('Expected six migrations and no remaining integration fixtures.');
+  if (remaining !== '7|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0') {
+    throw new Error('Expected seven migrations and no remaining integration fixtures.');
   }
   const stagingRemaining = docker([
     'exec',
@@ -273,12 +273,12 @@ try {
     '--username=vaultx_test',
     '--dbname=vaultx_pay_staging',
     '--set=ON_ERROR_STOP=1',
-    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments), (SELECT count(*) FROM dashboard_users), (SELECT count(*) FROM dashboard_memberships), (SELECT count(*) FROM dashboard_sessions), (SELECT count(*) FROM dashboard_login_limits), (SELECT count(*) FROM operator_access_policies), (SELECT count(*) FROM operator_permission_entitlements), (SELECT count(*) FROM membership_permission_grants), (SELECT count(*) FROM owner_principals), (SELECT count(*) FROM owner_permission_grants), (SELECT count(*) FROM owner_sessions), (SELECT count(*) FROM management_audit); ROLLBACK;',
+    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments), (SELECT count(*) FROM dashboard_users), (SELECT count(*) FROM dashboard_memberships), (SELECT count(*) FROM dashboard_sessions), (SELECT count(*) FROM dashboard_login_limits), (SELECT count(*) FROM operator_access_policies), (SELECT count(*) FROM operator_permission_entitlements), (SELECT count(*) FROM membership_permission_grants), (SELECT count(*) FROM owner_principals), (SELECT count(*) FROM owner_permission_grants), (SELECT count(*) FROM owner_sessions), (SELECT count(*) FROM management_audit), (SELECT count(*) FROM merchant_member_profiles), (SELECT count(*) FROM merchant_terminals), (SELECT count(*) FROM merchant_invitations), (SELECT count(*) FROM merchant_audit); ROLLBACK;',
   ]);
-  if (stagingRemaining !== '6|0|0|0|0|0|0|0|0|0|0|0|0|0|0')
+  if (stagingRemaining !== '7|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0')
     throw new Error('Staging CLI test fixtures were not cleaned up.');
   process.stdout.write(
-    'Confirmed in both disposable databases: 6 migrations applied; 0 operators, API keys, payments, dashboard users, memberships, sessions, limit buckets, viewer policies, entitlements/grants or management identities/sessions/audit remain.\n',
+    'Confirmed in both disposable databases: 7 migrations applied; 0 operators, API keys, payments, dashboard users, memberships, sessions, limit buckets, viewer policies, entitlements/grants or management identities/sessions/audit remain.\n',
   );
   const upgradeRemaining = docker([
     'exec',
@@ -293,12 +293,12 @@ try {
     '--username=vaultx_test',
     '--dbname=vaultx_pay_upgrade_test',
     '--set=ON_ERROR_STOP=1',
-    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments), (SELECT count(*) FROM dashboard_users), (SELECT count(*) FROM dashboard_memberships), (SELECT count(*) FROM dashboard_sessions), (SELECT count(*) FROM dashboard_login_limits), (SELECT count(*) FROM operator_access_policies), (SELECT count(*) FROM operator_permission_entitlements), (SELECT count(*) FROM membership_permission_grants), (SELECT count(*) FROM owner_principals), (SELECT count(*) FROM owner_permission_grants), (SELECT count(*) FROM owner_sessions), (SELECT count(*) FROM management_audit); ROLLBACK;',
+    '--command=BEGIN READ ONLY; SELECT (SELECT count(*) FROM schema_migrations), (SELECT count(*) FROM operators), (SELECT count(*) FROM operator_api_keys), (SELECT count(*) FROM payments), (SELECT count(*) FROM dashboard_users), (SELECT count(*) FROM dashboard_memberships), (SELECT count(*) FROM dashboard_sessions), (SELECT count(*) FROM dashboard_login_limits), (SELECT count(*) FROM operator_access_policies), (SELECT count(*) FROM operator_permission_entitlements), (SELECT count(*) FROM membership_permission_grants), (SELECT count(*) FROM owner_principals), (SELECT count(*) FROM owner_permission_grants), (SELECT count(*) FROM owner_sessions), (SELECT count(*) FROM management_audit), (SELECT count(*) FROM merchant_member_profiles), (SELECT count(*) FROM merchant_terminals), (SELECT count(*) FROM merchant_invitations), (SELECT count(*) FROM merchant_audit); ROLLBACK;',
   ]);
-  if (upgradeRemaining !== '6|0|0|0|0|0|0|0|0|0|0|0|0|0|0')
+  if (upgradeRemaining !== '7|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0|0')
     throw new Error('Upgrade/migration race fixtures were not cleaned up.');
   process.stdout.write(
-    'Confirmed upgrade/race disposable database: 6 migrations applied; zero application/auth fixtures remain.\n',
+    'Confirmed upgrade/race disposable database: 7 migrations applied; zero application/auth fixtures remain.\n',
   );
   if (check) await npm('build');
 } catch (error) {

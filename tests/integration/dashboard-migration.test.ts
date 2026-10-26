@@ -361,7 +361,11 @@ it('upgrades populated viewer schema 005 to management 006 without promoting ide
     const snapshot = async () => ({
       users: (await client.query('SELECT * FROM dashboard_users ORDER BY id')).rows,
       members: (await client.query('SELECT * FROM dashboard_memberships ORDER BY id')).rows,
-      grants: (await client.query('SELECT * FROM membership_permission_grants ORDER BY id')).rows,
+      grants: (
+        await client.query<Record<string, unknown>>(
+          'SELECT * FROM membership_permission_grants ORDER BY id',
+        )
+      ).rows,
       keys: (await client.query('SELECT * FROM operator_api_keys ORDER BY id')).rows,
       payments: (await client.query('SELECT * FROM payments ORDER BY id')).rows,
     });
@@ -461,6 +465,148 @@ it('upgrades populated viewer schema 005 to management 006 without promoting ide
   }
 });
 
+it('upgrades populated schema 006 to merchant 007 atomically without creating authority or changing viewers', async () => {
+  const pool = await openUpgradeDatabase();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'CREATE TABLE public.schema_migrations(name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())',
+    );
+    for (const name of [
+      '001_initial_schema',
+      '002_operator_api_keys',
+      '003_api_key_permissions',
+      '004_dashboard_auth',
+      '005_viewer_permissions',
+      '006_management_foundation',
+    ]) {
+      await client.query(
+        await readFile(new URL('../../migrations/' + name + '.sql', import.meta.url), 'utf8'),
+      );
+      await client.query('INSERT INTO public.schema_migrations(name) VALUES($1)', [name + '.sql']);
+    }
+    const operator = randomUUID(),
+      user = randomUUID(),
+      membership = randomUUID(),
+      key = generateOperatorApiKey();
+    await client.query('INSERT INTO operators(id,code,name) VALUES($1,$2,$3)', [
+      operator,
+      'upgrade_' + operator,
+      'Synthetic upgrade merchant',
+    ]);
+    await client.query('INSERT INTO operator_access_policies(operator_id) VALUES($1)', [operator]);
+    await client.query(
+      "INSERT INTO operator_permission_entitlements(operator_id,permission_code) VALUES($1,'client.payments.read'),($1,'client.status.read')",
+      [operator],
+    );
+    await client.query('INSERT INTO dashboard_users(id,username,password_hash) VALUES($1,$2,$3)', [
+      user,
+      'upgrade_' + user,
+      'SYNTHETIC_UNUSED_HASH',
+    ]);
+    await client.query(
+      'INSERT INTO dashboard_memberships(id,user_id,operator_id) VALUES($1,$2,$3)',
+      [membership, user, operator],
+    );
+    await client.query(
+      "INSERT INTO membership_permission_grants(id,membership_id,operator_id,permission_code) VALUES($1,$2,$3,'client.payments.read')",
+      [randomUUID(), membership, operator],
+    );
+    await client.query(
+      "INSERT INTO operator_api_keys(id,operator_id,name,key_hash,permission) VALUES($1,$2,'Synthetic',$3,'read_only')",
+      [randomUUID(), operator, key.keyHash],
+    );
+    const grants = (
+      await client.query<Record<string, unknown>>(
+        'SELECT * FROM membership_permission_grants ORDER BY id',
+      )
+    ).rows;
+    const members = (await client.query('SELECT * FROM dashboard_memberships ORDER BY id')).rows;
+    const keys = (await client.query('SELECT * FROM operator_api_keys ORDER BY id')).rows;
+    const migration = await readFile(
+      new URL('../../migrations/007_merchant_lifecycle.sql', import.meta.url),
+      'utf8',
+    );
+    await client.query('SAVEPOINT before_007');
+    await client.query(migration);
+    await client.query("INSERT INTO schema_migrations(name) VALUES('007_merchant_lifecycle.sql')");
+    await expect(client.query('SELECT 1/0')).rejects.toThrow();
+    await client.query('ROLLBACK TO SAVEPOINT before_007');
+    expect(
+      (await client.query("SELECT to_regclass('public.merchant_member_profiles') AS value")).rows[0]
+        .value,
+    ).toBeNull();
+    expect(
+      (
+        await client.query(
+          "SELECT code FROM owner_permission_catalog WHERE code='platform.clients.bootstrap_admin'",
+        )
+      ).rowCount,
+    ).toBe(0);
+    expect(
+      (
+        await client.query<Record<string, unknown>>(
+          'SELECT * FROM membership_permission_grants ORDER BY id',
+        )
+      ).rows,
+    ).toEqual(grants);
+    expect(
+      (
+        await client.query(
+          "SELECT name FROM schema_migrations WHERE name='007_merchant_lifecycle.sql'",
+        )
+      ).rowCount,
+    ).toBe(0);
+    await client.query(migration);
+    expect((await client.query('SELECT * FROM dashboard_memberships ORDER BY id')).rows).toEqual(
+      members,
+    );
+    expect((await client.query('SELECT * FROM operator_api_keys ORDER BY id')).rows).toEqual(keys);
+    const upgraded = (
+      await client.query<Record<string, unknown>>(
+        'SELECT * FROM membership_permission_grants ORDER BY id',
+      )
+    ).rows;
+    expect(upgraded).toEqual(
+      grants.map((g) => ({ ...g, issuer_owner_id: null, sponsor_grant_id: null })),
+    );
+    for (const table of [
+      'merchant_member_profiles',
+      'merchant_invitations',
+      'merchant_terminals',
+      'merchant_audit',
+      'owner_principals',
+    ])
+      expect((await client.query('SELECT count(*) AS count FROM ' + table)).rows[0].count).toBe(
+        '0',
+      );
+    expect(
+      (
+        await client.query(
+          'SELECT permission_code FROM operator_permission_entitlements WHERE operator_id=$1 ORDER BY permission_code',
+          [operator],
+        )
+      ).rows,
+    ).toEqual([
+      { permission_code: 'client.payments.read' },
+      { permission_code: 'client.status.read' },
+    ]);
+    expect(
+      (
+        await client.query(
+          'SELECT source,permission_code FROM membership_permission_grants WHERE membership_id=$1',
+          [membership],
+        )
+      ).rows,
+    ).toEqual([{ source: 'legacy_viewer', permission_code: 'client.payments.read' }]);
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+    await pool.end();
+  }
+});
+
 it(
   'serializes concurrent migration bootstrap, applies each file once and still propagates real SQL failures',
   { timeout: 20_000 },
@@ -506,6 +652,7 @@ it(
         '004_dashboard_auth.sql',
         '005_viewer_permissions.sql',
         '006_management_foundation.sql',
+        '007_merchant_lifecycle.sql',
       ]);
       await Promise.all(peers.map((peer) => runMigrations(peer)));
       expect(

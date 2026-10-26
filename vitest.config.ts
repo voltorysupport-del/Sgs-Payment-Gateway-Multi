@@ -22,8 +22,11 @@ export default defineConfig({
           exclude: [
             'tests/integration/dashboard-browser.test.ts',
             'tests/integration/management-browser.test.ts',
+            'tests/integration/merchant-browser.test.ts',
             'tests/integration/management-domain.test.ts',
             'tests/integration/management-api.test.ts',
+            'tests/integration/merchant-lifecycle.test.ts',
+            'tests/integration/merchant-session.test.ts',
           ],
         },
       },
@@ -34,6 +37,8 @@ export default defineConfig({
           include: [
             'tests/integration/management-domain.test.ts',
             'tests/integration/management-api.test.ts',
+            'tests/integration/merchant-lifecycle.test.ts',
+            'tests/integration/merchant-session.test.ts',
           ],
           // Owner-policy invalidation intentionally affects every owner fixture.
           // Explicit intra-test barriers exercise concurrency without unrelated
@@ -58,6 +63,7 @@ export default defineConfig({
           include: [
             'tests/integration/dashboard-browser.test.ts',
             'tests/integration/management-browser.test.ts',
+            'tests/integration/merchant-browser.test.ts',
           ],
           sequence: { groupOrder: 1 },
         },
