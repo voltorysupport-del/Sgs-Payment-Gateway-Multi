@@ -438,8 +438,13 @@ export async function executeManagement(
           case 'operators.update': {
             if (operator!.management_version !== command.expectedVersion) return denied('conflict');
             const updated = await client.query<OperatorRow>(
-              'UPDATE public.operators SET name=COALESCE($2,name),status=COALESCE($3,status),management_version=management_version+1 WHERE id=$1 RETURNING id,code,name,status,management_version',
-              [targetId, command.patch.name?.trim() ?? null, command.patch.status ?? null],
+              'UPDATE public.operators SET name=COALESCE($2,name),status=COALESCE($3,status),management_version=$4 WHERE id=$1 RETURNING id,code,name,status,management_version',
+              [
+                targetId,
+                command.patch.name?.trim() ?? null,
+                command.patch.status ?? null,
+                command.expectedVersion + 1,
+              ],
             );
             operator = updated.rows[0]!;
             value = { operator: operatorDto(operator) };
@@ -459,8 +464,8 @@ export async function executeManagement(
             if (!changed.rowCount) return denied('conflict');
             operator = (
               await client.query<OperatorRow>(
-                'UPDATE public.operators SET management_version=management_version+1 WHERE id=$1 RETURNING id,code,name,status,management_version',
-                [targetId],
+                'UPDATE public.operators SET management_version=$2 WHERE id=$1 RETURNING id,code,name,status,management_version',
+                [targetId, command.expectedVersion + 1],
               )
             ).rows[0]!;
             const revision = await client.query<{ authorization_version: number }>(
@@ -473,7 +478,8 @@ export async function executeManagement(
             };
             summary = {
               permission: command.permission,
-              version: revision.rows[0]!.authorization_version,
+              version: operator.management_version,
+              policyVersion: revision.rows[0]!.authorization_version,
             };
             break;
           }

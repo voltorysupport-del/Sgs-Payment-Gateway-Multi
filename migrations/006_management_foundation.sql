@@ -3,12 +3,19 @@
 ALTER TABLE public.operators ADD COLUMN management_version INTEGER NOT NULL DEFAULT 1 CHECK(management_version>0);
 CREATE FUNCTION public.advance_operator_management_version() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER
  SET search_path=pg_catalog,public,pg_temp AS $$
+DECLARE metadata_changed BOOLEAN;
 BEGIN
- IF NEW.management_version IS DISTINCT FROM OLD.management_version THEN
+ metadata_changed := (NEW.name,NEW.status) IS DISTINCT FROM (OLD.name,OLD.status);
+ IF metadata_changed OR NEW.management_version IS DISTINCT FROM OLD.management_version THEN
+  -- The trigger is the sole canonicalizer: proposals are validated, never added
+  -- to NEW. Both implicit metadata edits and explicit revision reservations
+  -- require the preowned tenant gate, then persist exactly OLD+1.
   PERFORM public.require_viewer_policy_gate(OLD.id);
-  IF NEW.management_version <> OLD.management_version+1 THEN RAISE EXCEPTION 'Management version refused' USING ERRCODE='42501'; END IF;
+  IF NEW.management_version IS DISTINCT FROM OLD.management_version
+   AND (NEW.management_version IS NULL OR NEW.management_version <> OLD.management_version+1)
+  THEN RAISE EXCEPTION 'Management version refused' USING ERRCODE='42501'; END IF;
+  NEW.management_version := OLD.management_version+1;
  END IF;
- IF (NEW.name,NEW.status) IS DISTINCT FROM (OLD.name,OLD.status) THEN NEW.management_version:=OLD.management_version+1; END IF;
  RETURN NEW;
 END; $$;
 CREATE TRIGGER operator_management_version BEFORE UPDATE ON public.operators FOR EACH ROW EXECUTE FUNCTION public.advance_operator_management_version();
@@ -67,7 +74,7 @@ CREATE TABLE public.management_audit (
  target_version INTEGER CHECK(target_version>0),
  occurred_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
  summary JSONB NOT NULL CHECK(jsonb_typeof(summary)='object' AND octet_length(summary::text)<=2048
-  AND summary - ARRAY['limit','offset','returned','nameChanged','status','permission','version']::text[] = '{}'::jsonb)
+  AND summary - ARRAY['limit','offset','returned','nameChanged','status','permission','version','policyVersion']::text[] = '{}'::jsonb)
 );
 CREATE INDEX management_audit_order ON public.management_audit(occurred_at DESC,id DESC);
 CREATE INDEX management_audit_tenant ON public.management_audit(operator_id,occurred_at DESC,id DESC);

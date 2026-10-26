@@ -420,6 +420,40 @@ it('upgrades populated viewer schema 005 to management 006 without promoting ide
     expect((await client.query('SELECT role FROM dashboard_memberships')).rows).toEqual([
       { role: 'viewer' },
     ]);
+    // The installed 006 trigger rejects unguarded legacy metadata writes.
+    await client.query('SAVEPOINT ungated_revision');
+    await expect(
+      client.query("UPDATE operators SET name='Not authorized' WHERE id=$1", [op]),
+    ).rejects.toMatchObject({ code: '42501' });
+    await client.query('ROLLBACK TO SAVEPOINT ungated_revision');
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended('vaultx.viewer.policy:' || $1::uuid::text,0))",
+      [op],
+    );
+    await client.query(
+      'SELECT operator_id FROM operator_access_policies WHERE operator_id=$1 FOR UPDATE',
+      [op],
+    );
+    await client.query('SELECT id FROM dashboard_users WHERE id=$1 FOR UPDATE', [user]);
+    await client.query('SELECT id FROM dashboard_memberships WHERE id=$1 FOR UPDATE', [member]);
+    await client.query('SELECT id FROM operators WHERE id=$1 FOR UPDATE', [op]);
+    await client.query(
+      'SELECT id FROM membership_permission_grants WHERE operator_id=$1 ORDER BY membership_id,permission_code,id FOR UPDATE',
+      [op],
+    );
+    const updated = await client.query(
+      "UPDATE operators SET name='Reviewed legacy update',management_version=management_version+1 WHERE id=$1 RETURNING management_version",
+      [op],
+    );
+    expect(updated.rows[0].management_version).toBe(2); // Never 3 from competing increments.
+    expect(
+      (
+        await client.query(
+          'UPDATE operators SET name=name,management_version=management_version+1 WHERE id=$1 RETURNING management_version',
+          [op],
+        )
+      ).rows[0].management_version,
+    ).toBe(3);
   } finally {
     await client.query('ROLLBACK');
     client.release();

@@ -10,6 +10,7 @@ import {
   cleanupViewerFixture,
   seedViewerFixture,
   insertViewerSession,
+  policyTransaction,
 } from '../viewer-policy-fixtures.js';
 
 let pool: Pool, actor: Awaited<ReturnType<typeof createOwnerFixture>>;
@@ -682,4 +683,183 @@ it('fails closed when an existing target has no tenant policy row and never repa
   } finally {
     await pool.query('DELETE FROM operators WHERE id=$1', [target]);
   }
+});
+
+it('advances the canonical operator revision exactly once for a combined metadata/status edit and an API no-op', async () => {
+  const combined = {
+    action: 'operators.update' as const,
+    targetId: operator,
+    expectedVersion: 1,
+    csrfHash: actor.csrfHash,
+    patch: { name: 'Combined revision fixture', status: 'suspended' as const },
+  };
+  expect(await executeManagement(pool, actor.tokenHash, combined)).toMatchObject({
+    ok: true,
+    value: { operator: { name: combined.patch.name, status: 'suspended', version: 2 } },
+  });
+  expect(
+    await executeManagement(pool, actor.tokenHash, { ...combined, expectedVersion: 2 }),
+  ).toMatchObject({
+    ok: true,
+    value: { operator: { name: combined.patch.name, status: 'suspended', version: 3 } },
+  });
+  expect(
+    await executeManagement(pool, actor.tokenHash, { ...combined, expectedVersion: 2 }),
+  ).toEqual({
+    ok: false,
+    error: 'conflict',
+  });
+  expect(
+    (await pool.query('SELECT management_version FROM operators WHERE id=$1', [operator])).rows[0]
+      .management_version,
+  ).toBe(3);
+  const events = await pool.query(
+    'SELECT target_version,summary FROM management_audit WHERE actor_id=$1 ORDER BY target_version',
+    [actor.id],
+  );
+  expect(events.rows).toEqual([
+    { target_version: 2, summary: { nameChanged: true, status: 'suspended', version: 2 } },
+    { target_version: 3, summary: { nameChanged: true, status: 'suspended', version: 3 } },
+  ]);
+});
+
+it('records distinct operator and policy revisions when withdrawing after multiple metadata and status edits', async () => {
+  const patches = [
+    { name: 'First revision fixture' },
+    { name: 'Second revision fixture' },
+    { status: 'suspended' as const },
+    { status: 'active' as const },
+    { name: 'Third revision fixture' },
+  ];
+  for (const [index, patch] of patches.entries()) {
+    expect(
+      await executeManagement(pool, actor.tokenHash, {
+        action: 'operators.update',
+        targetId: operator,
+        expectedVersion: index + 1,
+        csrfHash: actor.csrfHash,
+        patch,
+      }),
+    ).toMatchObject({ ok: true, value: { operator: { version: index + 2 } } });
+  }
+  expect(
+    (await pool.query('SELECT management_version FROM operators WHERE id=$1', [operator])).rows[0]
+      .management_version,
+  ).toBe(6);
+  expect(
+    (
+      await pool.query(
+        'SELECT authorization_version FROM operator_access_policies WHERE operator_id=$1',
+        [operator],
+      )
+    ).rows[0].authorization_version,
+  ).toBe(3);
+  const command = {
+    action: 'entitlements.withdraw' as const,
+    targetId: operator,
+    expectedVersion: 6,
+    csrfHash: actor.csrfHash,
+    permission: 'client.payments.read' as const,
+  };
+  expect(await executeManagement(pool, actor.tokenHash, command)).toMatchObject({
+    ok: true,
+    value: { operator: { version: 7 }, policyVersion: 4 },
+  });
+  expect(await executeManagement(pool, actor.tokenHash, command)).toEqual({
+    ok: false,
+    error: 'conflict',
+  });
+  const persisted = (
+    await pool.query('SELECT management_version FROM operators WHERE id=$1', [operator])
+  ).rows[0].management_version;
+  const policy = (
+    await pool.query(
+      'SELECT authorization_version FROM operator_access_policies WHERE operator_id=$1',
+      [operator],
+    )
+  ).rows[0].authorization_version;
+  expect(persisted).toBe(7);
+  expect(policy).toBe(4);
+  const events = await pool.query(
+    "SELECT target_version,summary FROM management_audit WHERE actor_id=$1 AND action='entitlements.withdraw'",
+    [actor.id],
+  );
+  expect(events.rows).toEqual([
+    {
+      target_version: persisted,
+      summary: { permission: 'client.payments.read', version: persisted, policyVersion: policy },
+    },
+  ]);
+});
+
+it('rejects revision jumps, reductions and null proposals even with metadata changes and a legitimate pre-gate', async () => {
+  for (const proposal of ['management_version+2', 'management_version-1', 'NULL']) {
+    await expect(
+      policyTransaction(pool, operator, (client) =>
+        client.query(
+          `UPDATE operators SET name='Rejected revision fixture',status='suspended',management_version=${proposal} WHERE id=$1`,
+          [operator],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+    expect(
+      (
+        await pool.query('SELECT name,status,management_version FROM operators WHERE id=$1', [
+          operator,
+        ])
+      ).rows[0],
+    ).toEqual({ name: 'Management fixture', status: 'active', management_version: 1 });
+    expect(
+      (
+        await pool.query(
+          'SELECT authorization_version FROM operator_access_policies WHERE operator_id=$1',
+          [operator],
+        )
+      ).rows[0].authorization_version,
+    ).toBe(1);
+    expect(
+      (
+        await pool.query(
+          'SELECT id FROM membership_permission_grants WHERE operator_id=$1 AND revoked_at IS NULL',
+          [operator],
+        )
+      ).rowCount,
+    ).toBe(2);
+  }
+  await expect(
+    pool.query("UPDATE operators SET name='Missing gate' WHERE id=$1", [operator]),
+  ).rejects.toMatchObject({ code: '42501' });
+  await expect(
+    pool.query('UPDATE operators SET management_version=management_version+1 WHERE id=$1', [
+      operator,
+    ]),
+  ).rejects.toMatchObject({ code: '42501' });
+  // An SQL no-op makes no policy/metadata change and does not consume a revision.
+  expect(
+    (
+      await pool.query(
+        'UPDATE operators SET name=name,management_version=management_version WHERE id=$1 RETURNING management_version',
+        [operator],
+      )
+    ).rows[0].management_version,
+  ).toBe(1);
+  const implicit = await policyTransaction(pool, operator, (client) =>
+    client.query(
+      "UPDATE operators SET name='Implicit canonical revision' WHERE id=$1 RETURNING management_version",
+      [operator],
+    ),
+  );
+  expect(implicit.rows[0].management_version).toBe(2);
+  const explicit = await policyTransaction(pool, operator, (client) =>
+    client.query(
+      "UPDATE operators SET name='Explicit canonical revision',status='suspended',management_version=management_version+1 WHERE id=$1 RETURNING management_version",
+      [operator],
+    ),
+  );
+  // The application proposes OLD+1; the trigger must not add a second increment.
+  expect(explicit.rows[0].management_version).toBe(3);
+  expect(
+    (await pool.query('SELECT management_version FROM operators WHERE id=$1', [operator])).rows[0]
+      .management_version,
+  ).toBe(3);
 });
