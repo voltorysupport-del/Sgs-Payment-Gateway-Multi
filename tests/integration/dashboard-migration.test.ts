@@ -150,6 +150,162 @@ it('upgrades populated schema 003 and rolls back all 004 objects and its migrati
   }
 });
 
+it('upgrades populated 004 to 005 atomically, preserving verifiers and viewer identity without implicit rights for ineligible users', async () => {
+  const pool = await openUpgradeDatabase(),
+    client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'CREATE TABLE public.schema_migrations(name TEXT PRIMARY KEY,applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())',
+    );
+    for (const name of [
+      '001_initial_schema',
+      '002_operator_api_keys',
+      '003_api_key_permissions',
+      '004_dashboard_auth',
+    ]) {
+      await client.query(
+        await readFile(new URL('../../migrations/' + name + '.sql', import.meta.url), 'utf8'),
+      );
+      await client.query('INSERT INTO schema_migrations(name) VALUES($1)', [name + '.sql']);
+    }
+    const op = randomUUID(),
+      suspended = randomUUID(),
+      users = [randomUUID(), randomUUID(), randomUUID()],
+      members = [randomUUID(), randomUUID(), randomUUID()],
+      key = generateOperatorApiKey(),
+      revoked = generateOperatorApiKey();
+    await client.query(
+      "INSERT INTO operators(id,name,code,status) VALUES($1::uuid,'Active',$1::uuid::text,'active'),($2::uuid,'Suspended',$2::uuid::text,'suspended')",
+      [op, suspended],
+    );
+    for (let i = 0; i < users.length; i++) {
+      await client.query(
+        'INSERT INTO dashboard_users(id,username,password_hash,status) VALUES($1::uuid,$1::uuid::text,$2,$3)',
+        [users[i], 'synthetic-existing-verifier', i === 1 ? 'disabled' : 'active'],
+      );
+      await client.query(
+        'INSERT INTO dashboard_memberships(id,user_id,operator_id) VALUES($1,$2,$3)',
+        [members[i], users[i], i === 2 ? suspended : op],
+      );
+    }
+    await client.query(
+      "INSERT INTO operator_api_keys(id,operator_id,name,key_hash,permission,revoked_at) VALUES($1,$2,'Reader',$3,'read_only',NULL),($4,$2,'Revoked',$5,'read_write',NOW())",
+      [randomUUID(), op, key.keyHash, randomUUID(), revoked.keyHash],
+    );
+    await client.query(
+      "INSERT INTO payments(id,operator_id,amount_minor,currency,idempotency_key) VALUES($1::uuid,$2,100,'EUR',$1::uuid::text)",
+      [randomUUID(), op],
+    );
+    await client.query(
+      "INSERT INTO dashboard_sessions(token_hash,csrf_hash,user_id,membership_id,auth_version) VALUES(repeat('a',64),repeat('b',64),$1,$2,1)",
+      [users[0], members[0]],
+    );
+    await client.query(
+      "INSERT INTO dashboard_sessions(token_hash,csrf_hash) VALUES(repeat('c',64),repeat('d',64))",
+    );
+    const before = {
+      users: (
+        await client.query('SELECT id,password_hash,auth_version FROM dashboard_users ORDER BY id')
+      ).rows,
+      keys: (
+        await client.query(
+          'SELECT id,key_hash,permission,revoked_at FROM operator_api_keys ORDER BY id',
+        )
+      ).rows,
+      payments: (await client.query('SELECT * FROM payments')).rows,
+    };
+    const migration = await readFile(
+      new URL('../../migrations/005_viewer_permissions.sql', import.meta.url),
+      'utf8',
+    );
+    for (const boundary of [
+      migration.indexOf('INSERT INTO public.operator_access_policies'),
+      migration.indexOf('DELETE FROM public.dashboard_sessions WHERE user_id'),
+      migration.length,
+    ]) {
+      await client.query('SAVEPOINT before_005');
+      await client.query(migration.slice(0, boundary));
+      await client.query(
+        "INSERT INTO schema_migrations(name) VALUES('005_viewer_permissions.sql')",
+      );
+      await expect(client.query('SELECT 1/0')).rejects.toThrow();
+      await client.query('ROLLBACK TO SAVEPOINT before_005');
+      expect(
+        (await client.query("SELECT to_regclass('public.membership_permission_grants') AS object"))
+          .rows,
+      ).toEqual([{ object: null }]);
+      expect(
+        (await client.query('SELECT token_hash FROM dashboard_sessions ORDER BY token_hash'))
+          .rowCount,
+      ).toBe(2);
+      expect(
+        (
+          await client.query(
+            "SELECT name FROM schema_migrations WHERE name='005_viewer_permissions.sql'",
+          )
+        ).rowCount,
+      ).toBe(0);
+    }
+    await client.query(migration);
+    expect(
+      (await client.query('SELECT id,password_hash,auth_version FROM dashboard_users ORDER BY id'))
+        .rows,
+    ).toEqual(before.users);
+    expect(
+      (
+        await client.query(
+          'SELECT id,key_hash,permission,revoked_at FROM operator_api_keys ORDER BY id',
+        )
+      ).rows,
+    ).toEqual(before.keys);
+    expect((await client.query('SELECT * FROM payments')).rows).toEqual(before.payments);
+    expect((await client.query('SELECT code FROM access_permissions ORDER BY code')).rows).toEqual([
+      { code: 'client.account.self' },
+      { code: 'client.payments.read' },
+      { code: 'client.status.read' },
+    ]);
+    expect(
+      (
+        await client.query(
+          'SELECT id,user_id,operator_id,role FROM dashboard_memberships ORDER BY id',
+        )
+      ).rows,
+    ).toHaveLength(3);
+    for (let i = 0; i < members.length; i++) {
+      const grants = await client.query(
+        'SELECT revoked_at,source FROM membership_permission_grants WHERE membership_id=$1',
+        [members[i]],
+      );
+      expect(grants.rows).toHaveLength(2);
+      for (const grant of grants.rows) {
+        expect(grant.source).toBe('legacy_viewer');
+        expect(grant.revoked_at === null).toBe(i === 0);
+      }
+    }
+    expect((await client.query('SELECT user_id FROM dashboard_sessions')).rows).toEqual([
+      { user_id: null },
+    ]);
+    expect((await authenticateOperatorKey(client as unknown as Pool, key.apiKey))?.permission).toBe(
+      'read_only',
+    );
+    expect(await authenticateOperatorKey(client as unknown as Pool, revoked.apiKey)).toBeNull();
+    for (const sql of [
+      "UPDATE dashboard_memberships SET role='client_admin'",
+      "INSERT INTO dashboard_sessions(token_hash,csrf_hash,user_id,membership_id,auth_version) SELECT repeat('e',64),repeat('f',64),user_id,id,1 FROM dashboard_memberships LIMIT 1",
+      'DELETE FROM dashboard_memberships',
+    ]) {
+      await client.query('SAVEPOINT invalid');
+      await expect(client.query(sql)).rejects.toThrow();
+      await client.query('ROLLBACK TO SAVEPOINT invalid');
+    }
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+    await pool.end();
+  }
+});
+
 it(
   'serializes concurrent migration bootstrap, applies each file once and still propagates real SQL failures',
   { timeout: 20_000 },
@@ -193,6 +349,7 @@ it(
         '002_operator_api_keys.sql',
         '003_api_key_permissions.sql',
         '004_dashboard_auth.sql',
+        '005_viewer_permissions.sql',
       ]);
       await Promise.all(peers.map((peer) => runMigrations(peer)));
       expect(

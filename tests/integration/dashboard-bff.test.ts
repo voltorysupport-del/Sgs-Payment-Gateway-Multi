@@ -1,3 +1,11 @@
+import {
+  seedViewerFixture,
+  cleanupViewerFixture,
+  policyQuery,
+  policyTransaction,
+  lockPolicyRows,
+  insertViewerSession,
+} from '../viewer-policy-fixtures.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -8,6 +16,7 @@ import { beforeAll, afterAll, beforeEach, afterEach, expect, it, vi } from 'vite
 import { createApp } from '../../src/app.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { createOperatorWithApiKey, generateOperatorApiKey } from '../../src/db/operator-keys.js';
+import { lockViewerIdentity, effectiveViewerPermissions } from '../../src/dashboard/permissions.js';
 import { withReadClient, ReadUnavailable } from '../../src/db/read-client.js';
 import { signReadRestriction } from '../../src/payments/internal-read.js';
 import { hashDashboardPassword } from '../../src/dashboard/passwords.js';
@@ -50,14 +59,12 @@ async function identity(op: string) {
     'INSERT INTO dashboard_memberships(id, user_id, operator_id) VALUES ($1, $2, $3)',
     [membership, id, op],
   );
-  await pool.query(
-    'INSERT INTO dashboard_sessions(token_hash, csrf_hash, user_id, membership_id, auth_version) VALUES ($1, $2, $3, $4, 1)',
-    [
-      createHash('sha256').update(token).digest('hex'),
-      randomBytes(32).toString('hex'),
-      id,
-      membership,
-    ],
+  await seedViewerFixture(pool, id);
+  await insertViewerSession(
+    pool,
+    id,
+    createHash('sha256').update(token).digest('hex'),
+    randomBytes(32).toString('hex'),
   );
   return { id, cookie: '__Host-vaultx_session=' + token };
 }
@@ -129,8 +136,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   upstreamGate = undefined;
-  for (const id of [user, otherUser])
-    await pool.query('DELETE FROM dashboard_users WHERE id = $1', [id]);
+  for (const id of [user, otherUser]) await cleanupViewerFixture(pool, id);
   for (const op of [operator, otherOperator]) {
     await pool.query('DELETE FROM payments WHERE operator_id = $1', [op]);
     await pool.query('DELETE FROM operator_api_keys WHERE operator_id = $1', [op]);
@@ -223,11 +229,23 @@ it.each(['disabled', 'suspended', 'membership', 'expired'])(
   'rejects %s identities on every BFF operation without contacting the gateway',
   async (mode) => {
     if (mode === 'disabled')
-      await pool.query("UPDATE dashboard_users SET status = 'disabled' WHERE id = $1", [user]);
+      await policyQuery(
+        pool,
+        operator,
+        "UPDATE dashboard_users SET status = 'disabled' WHERE id = $1",
+        [user],
+      );
     if (mode === 'suspended')
-      await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operator]);
+      await policyQuery(pool, operator, "UPDATE operators SET status = 'suspended' WHERE id = $1", [
+        operator,
+      ]);
     if (mode === 'membership')
-      await pool.query('DELETE FROM dashboard_memberships WHERE user_id = $1', [user]);
+      await policyQuery(
+        pool,
+        operator,
+        "UPDATE dashboard_memberships SET status='disabled' WHERE user_id=$1",
+        [user],
+      );
     if (mode === 'expired')
       await pool.query(
         "UPDATE dashboard_sessions SET last_seen_at = clock_timestamp() - INTERVAL '31 minutes' WHERE user_id = $1",
@@ -540,14 +558,26 @@ it.each(['disabled', 'membership', 'suspended'])(
     try {
       await entered.promise;
       if (mode === 'disabled')
-        await pool.query("UPDATE dashboard_users SET status = 'disabled' WHERE id = $1", [user]);
+        await policyQuery(
+          pool,
+          operator,
+          "UPDATE dashboard_users SET status = 'disabled' WHERE id = $1",
+          [user],
+        );
       if (mode === 'membership')
-        await pool.query('UPDATE dashboard_memberships SET operator_id = $2 WHERE user_id = $1', [
-          user,
-          otherOperator,
-        ]);
+        await policyQuery(
+          pool,
+          operator,
+          "UPDATE dashboard_memberships SET status='disabled' WHERE user_id=$1",
+          [user],
+        );
       if (mode === 'suspended')
-        await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operator]);
+        await policyQuery(
+          pool,
+          operator,
+          "UPDATE operators SET status = 'suspended' WHERE id = $1",
+          [operator],
+        );
       release.resolve();
       const result = await pending;
       expect(result.status).toBe(mode === 'suspended' ? 503 : 200);
@@ -750,4 +780,470 @@ it('sanitizes DB failures and rejects PATCH/OPTIONS/TRACE without invoking upstr
   for (const credential of [reader, writer, otherReader])
     expect(captured.output().includes(credential)).toBe(false);
   expect(captured.output().includes('"amountMinor"')).toBe(false);
+});
+
+async function renewViewerCookie(userId = user) {
+  const token = randomBytes(32).toString('hex');
+  await insertViewerSession(
+    pool,
+    userId,
+    createHash('sha256').update(token).digest('hex'),
+    randomBytes(32).toString('hex'),
+  );
+  return '__Host-vaultx_session=' + token;
+}
+it.each(['client.payments.read', 'client.status.read'])(
+  'enforces exact human permission %s, keeps self identity, and never restores withdrawn grants',
+  async (permission) => {
+    const before = await pool.query(
+      'SELECT key_hash,permission,revoked_at FROM operator_api_keys WHERE operator_id=$1 ORDER BY id',
+      [operator],
+    );
+    await policyQuery(
+      pool,
+      operator,
+      'UPDATE public.operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code=$2',
+      [operator, permission],
+    );
+    await request(app()).get('/dashboard-api/auth/me').set('Cookie', session).expect(401);
+    const fresh = await renewViewerCookie();
+    await request(app()).get('/dashboard-api/auth/me').set('Cookie', fresh).expect(200);
+    for (const path of ['/dashboard-api/payments', '/dashboard-api/payments/' + payment])
+      await request(app())
+        .get(path)
+        .set('Cookie', fresh)
+        .expect(permission === 'client.payments.read' ? 403 : 200);
+    await request(app())
+      .get('/dashboard-api/status')
+      .set('Cookie', fresh)
+      .expect(permission === 'client.status.read' ? 403 : 200);
+    await policyQuery(
+      pool,
+      operator,
+      'UPDATE public.operator_permission_entitlements SET enabled=true WHERE operator_id=$1 AND permission_code=$2',
+      [operator, permission],
+    );
+    const again = await renewViewerCookie();
+    await request(app())
+      .get(
+        permission === 'client.payments.read' ? '/dashboard-api/payments' : '/dashboard-api/status',
+      )
+      .set('Cookie', again)
+      .expect(403);
+    const grants = await pool.query(
+      'SELECT revoked_at,revocation_reason FROM membership_permission_grants WHERE operator_id=$1 AND permission_code=$2',
+      [operator, permission],
+    );
+    expect(grants.rows).toHaveLength(1);
+    expect(grants.rows[0].revoked_at).not.toBeNull();
+    expect(grants.rows[0].revocation_reason).toBe('entitlement_withdrawn');
+    expect(
+      (
+        await pool.query(
+          'SELECT key_hash,permission,revoked_at FROM operator_api_keys WHERE operator_id=$1 ORDER BY id',
+          [operator],
+        )
+      ).rows,
+    ).toEqual(before.rows);
+    await request(app())
+      .get('/payments/' + payment)
+      .set('Authorization', 'Bearer ' + writer)
+      .expect(200);
+    await request(app())
+      .post('/payments/' + payment + '/simulate')
+      .set('Authorization', 'Bearer ' + writer)
+      .send({ outcome: 'succeeded' })
+      .expect(200);
+  },
+);
+it('withdrawal after BFF admission permits one original-tenant read, then denies every new admission', async () => {
+  const entered = barrier(),
+    release = barrier();
+  upstreamGate = async () => {
+    entered.resolve();
+    await release.promise;
+  };
+  const active = app();
+  const pending = request(active)
+    .get('/dashboard-api/payments')
+    .set('Cookie', session)
+    .then((r) => r);
+  try {
+    await entered.promise;
+    await policyQuery(
+      pool,
+      operator,
+      "UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code='client.payments.read'",
+      [operator],
+    );
+    release.resolve();
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect((response.body as { payments: { id: string }[] }).payments.map((p) => p.id)).toEqual([
+      payment,
+    ]);
+    expect(JSON.stringify(response.body)).not.toContain(otherPayment);
+    await request(active).get('/dashboard-api/payments').set('Cookie', session).expect(401);
+    await request(active)
+      .get('/dashboard-api/payments')
+      .set('Cookie', await renewViewerCookie())
+      .expect(403);
+  } finally {
+    release.resolve();
+    await pending;
+  }
+});
+it('retains membership/grant history on disablement and rejects identity replacement and grant resurrection', async () => {
+  const id = (
+    await pool.query<{ id: string }>('SELECT id FROM dashboard_memberships WHERE user_id=$1', [
+      user,
+    ])
+  ).rows[0]!.id;
+  await expect(
+    policyQuery(
+      pool,
+      operator,
+      'UPDATE dashboard_memberships SET operator_id=$2 WHERE user_id=$1',
+      [user, otherOperator],
+    ),
+  ).rejects.toThrow();
+  await expect(
+    policyQuery(pool, operator, 'UPDATE dashboard_memberships SET id=$2 WHERE user_id=$1', [
+      user,
+      randomUUID(),
+    ]),
+  ).rejects.toThrow();
+  await expect(
+    pool.query("UPDATE dashboard_memberships SET role='client_admin' WHERE user_id=$1", [user]),
+  ).rejects.toThrow();
+  await expect(
+    pool.query('UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1', [
+      operator,
+    ]),
+  ).rejects.toMatchObject({ code: '42501' });
+  await policyQuery(
+    pool,
+    operator,
+    "UPDATE dashboard_memberships SET status='disabled' WHERE user_id=$1",
+    [user],
+  );
+  expect(
+    (await pool.query('SELECT id,status FROM dashboard_memberships WHERE user_id=$1', [user])).rows,
+  ).toEqual([{ id, status: 'disabled' }]);
+  expect(
+    (
+      await pool.query(
+        'SELECT id FROM membership_permission_grants WHERE membership_id=$1 AND revoked_at IS NULL',
+        [id],
+      )
+    ).rowCount,
+  ).toBe(0);
+  await policyQuery(
+    pool,
+    operator,
+    "UPDATE dashboard_memberships SET status='active' WHERE user_id=$1",
+    [user],
+  );
+  const fresh = await renewViewerCookie();
+  await request(app()).get('/dashboard-api/auth/me').set('Cookie', fresh).expect(200);
+  await request(app()).get('/dashboard-api/payments').set('Cookie', fresh).expect(403);
+  await policyQuery(
+    pool,
+    operator,
+    'UPDATE dashboard_users SET auth_version=auth_version+1 WHERE id=$1',
+    [user],
+  );
+  await expect(
+    policyQuery(
+      pool,
+      operator,
+      'UPDATE dashboard_users SET auth_version=auth_version-1 WHERE id=$1',
+      [user],
+    ),
+  ).rejects.toThrow();
+  await request(app()).get('/dashboard-api/auth/me').set('Cookie', fresh).expect(401);
+  await expect(
+    policyQuery(
+      pool,
+      operator,
+      'UPDATE membership_permission_grants SET revoked_at=NULL,revocation_reason=NULL,revocation_policy_version=NULL WHERE membership_id=$1',
+      [id],
+    ),
+  ).rejects.toThrow();
+});
+it('makes admission wait for withdrawal commit and fails closed on a busy gate, then recovers', async () => {
+  const holder = await pool.connect();
+  try {
+    await holder.query('BEGIN');
+    await lockPolicyRows(holder, operator);
+    const admission = request(app())
+      .get('/dashboard-api/payments')
+      .set('Cookie', session)
+      .then((r) => r);
+    void admission.catch(() => undefined);
+    let waiting = false;
+    for (let i = 0; i < 100; i++) {
+      const result = await holder.query<{ waiting: boolean }>(
+        `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS waiting`,
+      );
+      if (result.rows[0]?.waiting) {
+        waiting = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(waiting).toBe(true);
+    await holder.query(
+      "UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code='client.payments.read'",
+      [operator],
+    );
+    await holder.query('COMMIT');
+    expect((await admission).status).toBe(401);
+    const cookie = await renewViewerCookie();
+    await request(app()).get('/dashboard-api/status').set('Cookie', cookie).expect(200);
+    await holder.query('BEGIN');
+    await lockPolicyRows(holder, operator);
+    const denied = await request(app()).get('/dashboard-api/status').set('Cookie', cookie);
+    expect(denied.status).toBe(503);
+    expect(JSON.stringify(denied.body)).not.toMatch(/vaultx|SELECT|password|key_hash/i);
+    await holder.query('ROLLBACK');
+    await request(app()).get('/dashboard-api/status').set('Cookie', cookie).expect(200);
+  } finally {
+    await holder.query('ROLLBACK');
+    holder.release();
+  }
+});
+it('takes the admission shared gate before policy mutation; reducers queue in either order without deadlocks', async () => {
+  const holder = await pool.connect();
+  try {
+    await holder.query('BEGIN');
+    await holder.query(
+      "SELECT pg_advisory_xact_lock_shared(hashtextextended('vaultx.viewer.policy:' || $1::text,0))",
+      [operator],
+    );
+    await holder.query(
+      'SELECT operator_id FROM operator_access_policies WHERE operator_id=$1 FOR SHARE',
+      [operator],
+    );
+    const first = policyQuery(
+      pool,
+      operator,
+      "UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code='client.payments.read'",
+      [operator],
+    );
+    void first.catch(() => undefined);
+    const second = policyQuery(
+      pool,
+      operator,
+      "UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code='client.status.read'",
+      [operator],
+    );
+    void second.catch(() => undefined);
+    let waiting = 0;
+    for (let i = 0; i < 100; i++) {
+      const q = await holder.query<{ count: string }>(
+        "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
+      );
+      waiting = Number(q.rows[0]?.count);
+      if (waiting >= 2) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(waiting).toBeGreaterThanOrEqual(2);
+    await holder.query('COMMIT');
+    await Promise.all([first, second]);
+    const fresh = await renewViewerCookie();
+    await request(app()).get('/dashboard-api/payments').set('Cookie', fresh).expect(403);
+    await request(app()).get('/dashboard-api/status').set('Cookie', fresh).expect(403);
+  } finally {
+    await holder.query('ROLLBACK');
+    holder.release();
+  }
+});
+it('uses real restricted runtime privileges: policy reads succeed, catalog/grant/lifecycle DML and DDL deny', async () => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('GRANT USAGE ON SCHEMA public TO vaultx_viewer_runtime');
+    await client.query(
+      'GRANT SELECT ON public.dashboard_users,public.dashboard_memberships,public.operators,public.operator_access_policies,public.operator_permission_entitlements,public.membership_permission_grants,public.access_permissions TO vaultx_viewer_runtime',
+    );
+    await client.query(
+      'GRANT UPDATE(id) ON public.dashboard_users,public.dashboard_memberships,public.operators,public.membership_permission_grants TO vaultx_viewer_runtime',
+    );
+    await client.query(
+      'GRANT UPDATE(operator_id) ON public.operator_access_policies TO vaultx_viewer_runtime',
+    );
+    await client.query(
+      'GRANT SELECT,INSERT,DELETE ON public.dashboard_sessions TO vaultx_viewer_runtime',
+    );
+    await client.query(
+      'GRANT UPDATE(last_seen_at,csrf_hash) ON public.dashboard_sessions TO vaultx_viewer_runtime',
+    );
+    await client.query('SET LOCAL ROLE vaultx_viewer_runtime');
+    const member = await client.query<{ id: string }>(
+      'SELECT id FROM dashboard_memberships WHERE user_id=$1',
+      [user],
+    );
+    expect(await lockViewerIdentity(client, user, member.rows[0]!.id, operator)).toBeDefined();
+    expect(await effectiveViewerPermissions(client, member.rows[0]!.id, operator)).toEqual([
+      'client.payments.read',
+      'client.status.read',
+    ]);
+    expect(
+      (
+        await client.query(
+          'SELECT permission_code FROM membership_permission_grants WHERE operator_id=$1',
+          [operator],
+        )
+      ).rowCount,
+    ).toBe(2);
+    // Even a caller owning the exclusive pre-gate cannot use the immutable
+    // identity-column UPDATE privileges granted solely for row locking.
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended('vaultx.viewer.policy:' || $1::text,0))",
+      [operator],
+    );
+    const attacks = [
+      'UPDATE operator_permission_entitlements SET enabled=false',
+      'DELETE FROM membership_permission_grants',
+      "UPDATE dashboard_memberships SET status='disabled'",
+      "UPDATE dashboard_users SET status='disabled'",
+      "UPDATE operators SET status='suspended'",
+      'DELETE FROM access_permissions',
+      'CREATE TABLE public.forbidden_policy_write(id int)',
+    ];
+    for (const sql of attacks) {
+      await client.query('SAVEPOINT denied');
+      await expect(client.query(sql)).rejects.toMatchObject({ code: '42501' });
+      await client.query('ROLLBACK TO SAVEPOINT denied');
+    }
+    await client.query('SAVEPOINT scoped_identity');
+    await expect(
+      client.query('UPDATE dashboard_memberships SET id=id WHERE user_id=$1', [user]),
+    ).rejects.toMatchObject({ code: '42501' });
+    await client.query('ROLLBACK TO SAVEPOINT scoped_identity');
+    expect(
+      (await client.query('SELECT token_hash FROM dashboard_sessions WHERE user_id=$1', [user]))
+        .rowCount,
+    ).toBe(1);
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+});
+it('rolls back policy/grant/session invalidation together on a failed withdrawal', async () => {
+  const before = (
+    await pool.query(
+      'SELECT authorization_version FROM operator_access_policies WHERE operator_id=$1',
+      [operator],
+    )
+  ).rows;
+  await expect(
+    policyTransaction(pool, operator, async (client) => {
+      await client.query(
+        "UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code='client.payments.read'",
+        [operator],
+      );
+      await client.query('SELECT 1/0');
+    }),
+  ).rejects.toThrow();
+  expect(
+    (
+      await pool.query(
+        'SELECT authorization_version FROM operator_access_policies WHERE operator_id=$1',
+        [operator],
+      )
+    ).rows,
+  ).toEqual(before);
+  expect(
+    (
+      await pool.query(
+        'SELECT id FROM membership_permission_grants WHERE operator_id=$1 AND revoked_at IS NULL',
+        [operator],
+      )
+    ).rowCount,
+  ).toBe(2);
+  await request(app()).get('/dashboard-api/payments').set('Cookie', session).expect(200);
+  await expect(
+    pool.query('DELETE FROM dashboard_memberships WHERE user_id=$1', [user]),
+  ).rejects.toMatchObject({ code: '23503' });
+});
+
+it('permits only complete one-way grant revocation at the current statement and policy version', async () => {
+  const before = (
+    await pool.query(
+      `SELECT g.*,m.authorization_version AS member_version FROM membership_permission_grants g
+     JOIN dashboard_memberships m ON m.id=g.membership_id
+     WHERE m.user_id=$1 AND g.permission_code='client.payments.read'`,
+      [user],
+    )
+  ).rows[0]!;
+  const invalid = [
+    'revoked_at=revoked_at',
+    "revocation_reason='withdrawn'",
+    'revocation_policy_version=1',
+    "revoked_at=statement_timestamp(),revocation_reason='withdrawn',revocation_policy_version=NULL",
+    'revoked_at=statement_timestamp(),revocation_reason=NULL,revocation_policy_version=1',
+    "revoked_at=statement_timestamp(),revocation_reason='withdrawn',revocation_policy_version=2",
+    "revoked_at=statement_timestamp()-interval '1 second',revocation_reason='withdrawn',revocation_policy_version=1",
+    "revoked_at=statement_timestamp()+interval '1 second',revocation_reason='withdrawn',revocation_policy_version=1",
+    "source='legacy_viewer'",
+    'created_at=created_at',
+    'id=id',
+    'operator_id=operator_id',
+    'membership_id=membership_id',
+    'permission_code=permission_code',
+    'realm=realm',
+  ];
+  for (const change of invalid) {
+    await expect(
+      policyQuery(pool, operator, `UPDATE membership_permission_grants SET ${change} WHERE id=$1`, [
+        before.id,
+      ]),
+    ).rejects.toThrow();
+  }
+  expect(
+    (await pool.query('SELECT * FROM membership_permission_grants WHERE id=$1', [before.id]))
+      .rows[0],
+  ).toEqual(Object.fromEntries(Object.entries(before).filter(([key]) => key !== 'member_version')));
+  await request(app()).get('/dashboard-api/payments').set('Cookie', session).expect(200);
+  const revoked = await policyQuery(
+    pool,
+    operator,
+    `UPDATE membership_permission_grants SET revoked_at=statement_timestamp(),revocation_reason='withdrawn',
+      revocation_policy_version=(SELECT authorization_version FROM operator_access_policies WHERE operator_id=$2)
+     WHERE id=$1 RETURNING *,revoked_at=statement_timestamp() AS authoritative_timestamp`,
+    [before.id, operator],
+  );
+  expect(revoked.rows[0].authoritative_timestamp).toBe(true);
+  expect(
+    (
+      await pool.query('SELECT authorization_version FROM dashboard_memberships WHERE id=$1', [
+        before.membership_id,
+      ])
+    ).rows[0].authorization_version,
+  ).toBe(before.member_version + 1);
+  await request(app()).get('/dashboard-api/auth/me').set('Cookie', session).expect(401);
+  const fresh = await renewViewerCookie();
+  await request(app()).get('/dashboard-api/payments').set('Cookie', fresh).expect(403);
+  await request(app()).get('/dashboard-api/status').set('Cookie', fresh).expect(200);
+  for (const change of [
+    'revoked_at=NULL,revocation_reason=NULL,revocation_policy_version=NULL',
+    'revoked_at=statement_timestamp()',
+    "revocation_reason='entitlement_withdrawn'",
+    'revocation_policy_version=revocation_policy_version+1',
+    'revocation_policy_version=revocation_policy_version',
+  ]) {
+    await expect(
+      policyQuery(pool, operator, `UPDATE membership_permission_grants SET ${change} WHERE id=$1`, [
+        before.id,
+      ]),
+    ).rejects.toThrow();
+  }
+  const { authoritative_timestamp: _timestamp, ...history } = revoked.rows[0];
+  expect(_timestamp).toBe(true);
+  expect(
+    (await pool.query('SELECT * FROM membership_permission_grants WHERE id=$1', [before.id]))
+      .rows[0],
+  ).toEqual(history);
 });

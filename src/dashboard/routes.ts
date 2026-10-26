@@ -11,6 +11,7 @@ import {
   DASHBOARD_SESSION_COOKIE as cookieName,
   touchDashboardSession,
 } from './sessions.js';
+import { lockViewerIdentity } from './permissions.js';
 import { dummyPasswordHash, verifyDashboardPassword } from './passwords.js';
 
 const cookieOptions = { secure: true, httpOnly: true, sameSite: 'lax' as const, path: '/' };
@@ -34,7 +35,9 @@ async function session(pool: Pool, req: Request): Promise<Session | undefined> {
     LEFT JOIN operators o ON o.id = m.operator_id
     WHERE s.token_hash = $1 AND (
       (s.user_id IS NULL AND s.created_at > NOW() - INTERVAL '10 minutes') OR
-      (u.status = 'active' AND o.status = 'active' AND s.auth_version = u.auth_version
+      (u.status = 'active' AND m.status='active' AND m.role='viewer' AND o.status = 'active' AND s.auth_version = u.auth_version
+       AND s.membership_authz_version=m.authorization_version
+       AND s.operator_authz_version=(SELECT authorization_version FROM public.operator_access_policies WHERE operator_id=o.id)
        AND s.created_at > NOW() - INTERVAL '8 hours'
        AND s.last_seen_at > NOW() - INTERVAL '30 minutes'))`,
     [digest(value)],
@@ -204,10 +207,23 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
       const value = token(),
         csrfToken = token();
       try {
-        await client.query('BEGIN');
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
         await client.query(
           "SET LOCAL statement_timeout = '5000ms'; SET LOCAL lock_timeout = '2000ms'",
         );
+        const policy =
+          user.membership_id && user.operator_id
+            ? await lockViewerIdentity(client, user.id, user.membership_id, user.operator_id)
+            : undefined;
+        if (
+          !policy ||
+          policy.user.password_hash !== user.password_hash ||
+          policy.user.auth_version !== user.auth_version
+        ) {
+          await client.query('ROLLBACK');
+          sendError(res, 401, 'unauthorized', 'Invalid credentials.');
+          return;
+        }
         await client.query(
           'SELECT token_hash FROM public.dashboard_sessions WHERE token_hash = $1 FOR UPDATE',
           [pre.token_hash],
@@ -220,8 +236,8 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
         );
         const inserted = consumed.rowCount
           ? await client.query(
-              `INSERT INTO dashboard_sessions(token_hash, csrf_hash, user_id, membership_id, auth_version)
-          SELECT $1, $2, u.id, m.id, u.auth_version FROM dashboard_users u
+              `INSERT INTO dashboard_sessions(token_hash, csrf_hash, user_id, membership_id, auth_version, membership_authz_version, operator_authz_version)
+          SELECT $1, $2, u.id, m.id, u.auth_version, m.authorization_version, $8 FROM dashboard_users u
           JOIN dashboard_memberships m ON m.user_id = u.id JOIN operators o ON o.id = m.operator_id
           WHERE u.id = $3 AND u.password_hash = $4 AND u.auth_version = $5
             AND m.id = $6 AND m.operator_id = $7 AND u.status = 'active' AND o.status = 'active'
@@ -234,6 +250,7 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
                 user.auth_version,
                 user.membership_id,
                 user.operator_id,
+                policy.operatorVersion,
               ],
             )
           : undefined;

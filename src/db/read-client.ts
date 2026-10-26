@@ -12,7 +12,13 @@ const admitted = new WeakMap<Pool, number>();
 export async function withReadClient<T>(
   pool: Pool,
   run: (client: PoolClient) => Promise<T>,
-  options: { readOnly?: boolean; statementMs?: number; lockMs?: number; totalMs?: number } = {},
+  options: {
+    readOnly?: boolean;
+    statementMs?: number;
+    lockMs?: number;
+    totalMs?: number;
+    readCommitted?: boolean;
+  } = {},
 ): Promise<T> {
   const count = admitted.get(pool) ?? 0;
   if (count >= 4) throw new ReadUnavailable();
@@ -79,7 +85,13 @@ export async function withReadClient<T>(
   });
   const transaction = async () => {
     try {
-      await client.query(options.readOnly === false ? 'BEGIN' : 'BEGIN READ ONLY');
+      await client.query(
+        options.readOnly === false
+          ? options.readCommitted
+            ? 'BEGIN ISOLATION LEVEL READ COMMITTED'
+            : 'BEGIN'
+          : 'BEGIN READ ONLY',
+      );
       if (expired) throw new ReadUnavailable();
       // Values are private numeric policy constants, never browser/config input.
       await client.query(

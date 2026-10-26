@@ -1,4 +1,5 @@
 /// <reference lib="dom" />
+import { seedViewerFixture, cleanupViewerFixture, policyQuery } from '../viewer-policy-fixtures.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, mkdir } from 'node:fs/promises';
@@ -84,6 +85,8 @@ it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
         'INSERT INTO dashboard_memberships(id,user_id,operator_id) VALUES ($1,$2,$3)',
         [randomUUID(), alternateUser, first.operatorId],
       );
+      await seedViewerFixture(pool, user);
+      await seedViewerFixture(pool, alternateUser);
       const ids = Array.from({ length: 11 }, () => randomUUID());
       for (const [i, id] of ids.entries())
         await pool.query(
@@ -403,7 +406,12 @@ it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
       await browserExpect(third.locator('.account')).toContainText(alternateName);
       await cycle();
       await browserExpect(page.locator('.account')).toContainText(alternateName);
-      await pool.query("UPDATE dashboard_users SET status='disabled' WHERE id=$1", [alternateUser]);
+      await policyQuery(
+        pool,
+        first.operatorId,
+        "UPDATE dashboard_users SET status='disabled' WHERE id=$1",
+        [alternateUser],
+      );
       await third.getByRole('link', { name: 'Payments', exact: true }).click();
       await browserExpect(third.getByRole('heading', { name: 'Welcome back' })).toBeFocused();
       await cycle();
@@ -422,7 +430,7 @@ it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
       await browser?.close();
       if (secure) await new Promise<void>((resolve) => secure!.close(() => resolve()));
       if (gateway) await new Promise<void>((resolve) => gateway!.close(() => resolve()));
-      for (const user of users) await pool.query('DELETE FROM dashboard_users WHERE id=$1', [user]);
+      for (const user of users) await cleanupViewerFixture(pool, user);
       for (const op of operators) {
         await pool.query('DELETE FROM payments WHERE operator_id=$1', [op]);
         await pool.query('DELETE FROM operator_api_keys WHERE operator_id=$1', [op]);
