@@ -1,0 +1,31 @@
+.owner-section {
+  margin-top: 24px;
+}
+.owner-content {
+  padding: 24px;
+}
+.owner-content p,
+.owner-content h3,
+.owner-content button,
+.owner-content input {
+  margin-top: 12px;
+}
+.owner-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.owner-unavailable {
+  padding: 32px;
+  gap: 22px;
+  text-align: center;
+}
+.owner-unavailable p {
+  max-width: 620px;
+  color: var(--muted);
+}
+@media (max-width: 760px) {
+  .sidebar nav {
+    flex-wrap: wrap;
+  }
+}
