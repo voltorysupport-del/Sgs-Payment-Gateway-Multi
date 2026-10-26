@@ -639,3 +639,47 @@ it('rolls back mutation and its audit if the session expires while the mandatory
     holder.release();
   }
 });
+
+it('fails closed when an existing target has no tenant policy row and never repairs it', async () => {
+  const target = randomUUID();
+  await pool.query("INSERT INTO operators(id,name,code) VALUES($1,'Uninitialized client',$2)", [
+    target,
+    'unknown_policy_' + target,
+  ]);
+  try {
+    expect(
+      await executeManagement(pool, actor.tokenHash, {
+        action: 'operators.detail',
+        targetId: target,
+      }),
+    ).toEqual({ ok: false, error: 'unavailable' });
+    expect(
+      await executeManagement(pool, actor.tokenHash, {
+        action: 'operators.update',
+        targetId: target,
+        expectedVersion: 1,
+        csrfHash: actor.csrfHash,
+        patch: { status: 'suspended' },
+      }),
+    ).toEqual({ ok: false, error: 'unavailable' });
+    expect(
+      (await pool.query('SELECT status,management_version FROM operators WHERE id=$1', [target]))
+        .rows[0],
+    ).toEqual({ status: 'active', management_version: 1 });
+    expect(
+      (
+        await pool.query('SELECT operator_id FROM operator_access_policies WHERE operator_id=$1', [
+          target,
+        ])
+      ).rowCount,
+    ).toBe(0);
+    expect(
+      await executeManagement(pool, actor.tokenHash, {
+        action: 'operators.detail',
+        targetId: randomUUID(),
+      }),
+    ).toEqual({ ok: false, error: 'not_found' });
+  } finally {
+    await pool.query('DELETE FROM operators WHERE id=$1', [target]);
+  }
+});

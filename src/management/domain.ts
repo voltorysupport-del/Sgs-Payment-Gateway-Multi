@@ -164,21 +164,27 @@ async function lockTenant(
   client: PoolClient,
   operator: string,
   exclusive: boolean,
-): Promise<boolean> {
+): Promise<true | 'unavailable' | 'not_found'> {
   await client.query(
     `SELECT pg_catalog.${exclusive ? 'pg_advisory_xact_lock' : 'pg_advisory_xact_lock_shared'}(pg_catalog.hashtextextended('vaultx.viewer.policy:' || $1::uuid::text,0))`,
     [operator],
   );
-  await client.query(
+  const policy = await client.query(
     `SELECT operator_id FROM public.operator_access_policies WHERE operator_id=$1 FOR ${exclusive ? 'UPDATE' : 'SHARE'}`,
     [operator],
   );
+  if (!policy.rowCount) {
+    // An advisory pre-gate does not replace the required policy row gate.
+    // This probe selects only a denial status; it can never authorize a read/write.
+    const known = await client.query('SELECT id FROM public.operators WHERE id=$1', [operator]);
+    return known.rowCount ? 'unavailable' : 'not_found';
+  }
   if (exclusive) {
     const count = await client.query<{ count: string }>(
       'SELECT count(*) FROM public.dashboard_memberships WHERE operator_id=$1',
       [operator],
     );
-    if (Number(count.rows[0]?.count) > 1000) return false;
+    if (Number(count.rows[0]?.count) > 1000) return 'unavailable';
     await client.query(
       'SELECT id FROM public.dashboard_users WHERE id IN(SELECT user_id FROM public.dashboard_memberships WHERE operator_id=$1) ORDER BY id FOR UPDATE',
       [operator],
@@ -333,7 +339,8 @@ export async function executeManagement(
         const targetId = 'targetId' in command ? command.targetId : undefined;
         let operator: OperatorRow | undefined;
         if (targetId) {
-          if (!(await lockTenant(client, targetId, writes(command)))) return denied('unavailable');
+          const tenant = await lockTenant(client, targetId, writes(command));
+          if (tenant !== true) return denied(tenant);
           operator = (
             await client.query<OperatorRow>(
               'SELECT id,code,name,status,management_version FROM public.operators WHERE id=$1',
