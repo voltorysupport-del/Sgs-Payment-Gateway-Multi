@@ -28,3 +28,6 @@ jobs:
       - run: npm run build
       - name: Real DPAPI encryption, protected delivery, decryption and tamper checks
         run: npm test -- tests/windows/key-delivery.test.ts tests/unit/windows-key-delivery.test.ts tests/integration/request-parsing.test.ts tests/unit/dashboard-passwords.test.ts tests/unit/dashboard-gateway-reader.test.ts tests/unit/internal-read.test.ts tests/unit/read-client.test.ts
+
+      - name: Frontend components, session flows, and accessibility (synthetic responses)
+        run: npm run test:frontend
