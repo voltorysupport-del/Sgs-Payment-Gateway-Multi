@@ -1,0 +1,110 @@
+name: Validate and deliver management preview v2
+
+on:
+  push:
+    branches: ['feature/local-dashboard-preview-v2']
+    paths:
+      - 'preview-artifacts/vaultx-dashboard-preview-v2.zip'
+      - '.github/workflows/dashboard-preview-v2.yml'
+
+permissions:
+  contents: read
+
+env:
+  LIVE_MODE_ENABLED: 'false'
+  ALLOWED_PROVIDERS: simulator
+  DASHBOARD_ENABLED: 'false'
+  DASHBOARD_BFF_ENABLED: 'false'
+  OWNER_ENABLED: 'false'
+  DATABASE_URL: ''
+
+jobs:
+  validate:
+    name: Synthetic preview smoke tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify original ZIP and extract tested copy
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, zipfile
+          from pathlib import Path
+          package = Path('preview-artifacts/vaultx-dashboard-preview-v2.zip')
+          expected = '3d3be14878334579ffd34b09fc48a674fcc3952f5c51d48607ed5dd09e3773aa'
+          assert package.stat().st_size == 220739
+          assert hashlib.sha256(package.read_bytes()).hexdigest() == expected
+          target = Path(os.environ['RUNNER_TEMP']) / 'vaultx-preview-v2'
+          target.mkdir(exist_ok=False)
+          with zipfile.ZipFile(package) as archive:
+              assert archive.testzip() is None
+              assert len(archive.namelist()) == 17
+              for name in archive.namelist():
+                  assert name.startswith('VaultX-Dashboard-Preview-v2/')
+                  assert '..' not in Path(name).parts
+              archive.extractall(target)
+          root = target / 'VaultX-Dashboard-Preview-v2'
+          manifest = json.loads((root / 'SHA256SUMS.json').read_text())
+          assert len(manifest) == 16
+          for name, digest in manifest.items():
+              assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('PREVIEW_ROOT=' + str(root) + '\n')
+              env.write('VAULTX_PREVIEW_BROWSER_TOOLS=' + str(Path(os.environ['RUNNER_TEMP']) / 'browser-tools') + '\n')
+          print('PASS: original ZIP checksum, CRC and every package manifest entry')
+          PY
+      - name: Test runtime using Node built-ins only
+        run: node --test "$PREVIEW_ROOT/tests/smoke.test.mjs"
+      - name: Test actual CMD launcher on Windows (Node launcher on Linux)
+        run: node "$PREVIEW_ROOT/tests/launcher-smoke.mjs"
+      - name: Install isolated browser validation tools outside package
+        run: |
+          npm install --prefix "$VAULTX_PREVIEW_BROWSER_TOOLS" --no-save --no-package-lock --no-audit --no-fund playwright@1.64.1
+          node "$VAULTX_PREVIEW_BROWSER_TOOLS/node_modules/playwright/cli.js" install chromium
+      - name: Verify all actual React screens and local demo actions
+        run: node "$PREVIEW_ROOT/tests/browser-smoke.mjs"
+      - name: Confirm testing did not change ZIP or packaged files
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          package = Path('preview-artifacts/vaultx-dashboard-preview-v2.zip')
+          assert hashlib.sha256(package.read_bytes()).hexdigest() == '3d3be14878334579ffd34b09fc48a674fcc3952f5c51d48607ed5dd09e3773aa'
+          root = Path(os.environ['PREVIEW_ROOT'])
+          manifest = json.loads((root / 'SHA256SUMS.json').read_text())
+          assert len([p for p in root.rglob('*') if p.is_file()]) == 17
+          for name, digest in manifest.items():
+              assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest
+          print('PASS: original ZIP and extracted package unchanged after tests')
+          PY
+
+  deliver:
+    name: Publish unchanged Windows preview ZIP
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify the original ZIP again
+        run: echo '3d3be14878334579ffd34b09fc48a674fcc3952f5c51d48607ed5dd09e3773aa  preview-artifacts/vaultx-dashboard-preview-v2.zip' | sha256sum --check --strict
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vaultx-dashboard-preview-v2-download
+          path: preview-artifacts/vaultx-dashboard-preview-v2.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
