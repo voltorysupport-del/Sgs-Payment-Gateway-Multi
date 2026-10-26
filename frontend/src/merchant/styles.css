@@ -1,0 +1,132 @@
+.merchant-layout {
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  min-height: 100vh;
+}
+.merchant-layout aside {
+  background: #101827;
+  border-right: 1px solid var(--line);
+  padding: 26px 20px;
+}
+.merchant-brand {
+  font-size: 25px;
+  font-weight: 800;
+}
+.merchant-brand span {
+  color: #9caaff;
+}
+.merchant-layout nav {
+  display: grid;
+  gap: 9px;
+  margin: 32px 0;
+}
+.merchant-layout nav button {
+  text-align: left;
+}
+.merchant-layout nav button[aria-current='page'] {
+  background: #30426b;
+  border-color: #9caaff;
+}
+.merchant-layout main {
+  padding: 28px;
+  min-width: 0;
+}
+.merchant-layout header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.merchant-layout section {
+  border: 1px solid var(--line);
+  background: #121c2e;
+  border-radius: 14px;
+  padding: 22px;
+  margin: 22px 0;
+}
+.merchant-warning {
+  background: #25233b;
+  border: 1px solid #7f749e;
+  border-radius: 10px;
+  padding: 14px;
+  color: #e2dcf9;
+}
+.merchant-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.merchant-check input {
+  width: auto;
+}
+.merchant-table {
+  overflow: auto;
+}
+.merchant-table table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+.merchant-table td,
+.merchant-table th {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.merchant-table button {
+  margin: 3px;
+}
+.merchant-layout form {
+  max-width: 520px;
+}
+.merchant-layout fieldset {
+  border: 1px solid var(--line);
+  margin: 16px 0;
+}
+.merchant-pages {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 15px;
+}
+.merchant-session {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 15px;
+  padding: 10px 24px;
+  background: #101827;
+  border-bottom: 1px solid var(--line);
+}
+.merchant-closed {
+  max-width: 740px;
+  margin: 10vh auto;
+  padding: 30px;
+}
+.merchant-closed a {
+  display: inline-block;
+  margin-right: 18px;
+  text-decoration: underline;
+}
+@media (max-width: 760px) {
+  .merchant-layout {
+    grid-template-columns: 1fr;
+  }
+  .merchant-layout aside {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .merchant-layout nav {
+    grid-template-columns: repeat(2, 1fr);
+    margin: 20px 0;
+  }
+  .merchant-layout main {
+    padding: 16px;
+  }
+  .merchant-layout header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .merchant-pages {
+    justify-content: center;
+  }
+}

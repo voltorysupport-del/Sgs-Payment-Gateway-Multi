@@ -6,7 +6,7 @@ on:
   push:
     branches: ['**']
   pull_request:
-    branches: [main, 'feature/step-1-project-setup', 'feature/management-*']
+    branches: [main, 'feature/step-1-project-setup', 'feature/management-*', 'feature/phase2-*']
 
 # Least privilege: the workflow can read the code and nothing else.
 permissions:

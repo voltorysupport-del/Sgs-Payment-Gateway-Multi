@@ -168,3 +168,32 @@ describe('owner foundation configuration boundary', () => {
       expect(() => loadConfig(env)).toThrow(ConfigError);
   });
 });
+
+describe('merchant management development gate', () => {
+  it('defaults off and requires the existing dashboard authentication gate', () => {
+    expect(loadConfig(VALID_ENV).merchantManagementEnabled).toBe(false);
+    expect(
+      problemsFor({ ...VALID_ENV, MERCHANT_MANAGEMENT_ENABLED: 'true' }).some((p) =>
+        p.startsWith('MERCHANT_MANAGEMENT_ENABLED'),
+      ),
+    ).toBe(true);
+    expect(
+      loadConfig({
+        ...VALID_ENV,
+        MERCHANT_MANAGEMENT_ENABLED: 'true',
+        DASHBOARD_ENABLED: 'true',
+        DASHBOARD_PUBLIC_ORIGIN: 'https://client.example.invalid',
+      }).merchantManagementEnabled,
+    ).toBe(true);
+  });
+  it('refuses production activation and never echoes private configuration', () => {
+    const problems = problemsFor({
+      ...VALID_ENV,
+      NODE_ENV: 'production',
+      MERCHANT_MANAGEMENT_ENABLED: 'true',
+      DASHBOARD_ENABLED: 'true',
+      DASHBOARD_PUBLIC_ORIGIN: 'https://client.example.invalid',
+    });
+    expect(problems.some((p) => p.startsWith('MERCHANT_MANAGEMENT_ENABLED'))).toBe(true);
+  });
+});

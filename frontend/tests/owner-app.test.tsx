@@ -15,6 +15,8 @@ vi.mock('../src/owner/api', async (original) => {
       operator: vi.fn(),
       memberships: vi.fn(),
       updateOperator: vi.fn(),
+      createMerchant: vi.fn(),
+      inviteAdministrator: vi.fn(),
       setStatus: vi.fn(),
       withdraw: vi.fn(),
       audit: vi.fn(),
@@ -78,10 +80,18 @@ beforeEach(() => {
   });
   vi.mocked(ownerApi.withdraw).mockResolvedValue(undefined);
   vi.mocked(ownerApi.logout).mockResolvedValue(undefined);
+  vi.mocked(ownerApi.createMerchant).mockResolvedValue({ operator: { ...operator, version: 1 } });
+  vi.mocked(ownerApi.inviteAdministrator).mockResolvedValue({
+    invitationId: '77777777-7777-4777-8777-777777777777',
+    expiresAt: '2026-12-01T00:00:00.000Z',
+    status: 'pending',
+    activationEnabled: false,
+  });
 });
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
+  vi.unstubAllGlobals();
   sessionStorage.clear();
 });
 async function openOperators() {
@@ -283,4 +293,109 @@ it('reports unconfirmed logout even when persistent denial storage is unavailabl
   });
   expect(ownerApi.me).toHaveBeenCalledTimes(checks);
   expect(screen.queryByRole('button', { name: 'Check existing owner session' })).toBeNull();
+});
+
+it('creates an empty merchant organization through its authorized API without provisioning credentials', async () => {
+  vi.stubGlobal(
+    'confirm',
+    vi.fn(() => true),
+  );
+  render(<OwnerApp />);
+  await openOperators();
+  await userEvent.type(screen.getByLabelText('Immutable merchant code'), 'synthetic-merchant');
+  await userEvent.type(screen.getByLabelText('Merchant display name'), 'Synthetic Merchant');
+  await userEvent.click(screen.getByRole('button', { name: 'Create merchant' }));
+  await waitFor(() =>
+    expect(ownerApi.createMerchant).toHaveBeenCalledWith({
+      code: 'synthetic-merchant',
+      name: 'Synthetic Merchant',
+    }),
+  );
+  expect(ownerApi.createMerchant).toHaveBeenCalledTimes(1);
+});
+it('hides creation and administrator invitations without their exact permissions', async () => {
+  vi.mocked(ownerApi.me).mockResolvedValue({ ...owner, permissions: ['platform.clients.read'] });
+  render(<OwnerApp />);
+  await openOperators();
+  expect(screen.queryByLabelText('Immutable merchant code')).toBeNull();
+  await userEvent.click(screen.getByRole('link', { name: 'Team and permissions' }));
+  await screen.findByText(operator.name);
+  await userEvent.click(screen.getByRole('button', { name: 'Inspect client_a' }));
+  await screen.findByText('client.payments.read');
+  expect(screen.queryByLabelText('Proposed administrator username')).toBeNull();
+});
+it('records pending administrator intent only with the separate bootstrap permission and explicit choices', async () => {
+  vi.stubGlobal(
+    'confirm',
+    vi.fn(() => true),
+  );
+  vi.mocked(ownerApi.me).mockResolvedValue({
+    ...owner,
+    permissions: [...owner.permissions, 'platform.clients.bootstrap_admin'],
+  });
+  render(<OwnerApp />);
+  await userEvent.click(await screen.findByRole('link', { name: 'Team and permissions' }));
+  await screen.findByText(operator.name);
+  await userEvent.click(screen.getByRole('button', { name: 'Inspect client_a' }));
+  await userEvent.type(
+    await screen.findByLabelText('Proposed administrator username'),
+    'synthetic.admin',
+  );
+  expect(screen.getByText(/Activation is not available/)).toBeTruthy();
+  await userEvent.click(screen.getByRole('checkbox', { name: 'client.users.manage_subaccounts' }));
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Record pending administrator invitation' }),
+  );
+  await waitFor(() =>
+    expect(ownerApi.inviteAdministrator).toHaveBeenCalledWith(operator.id, {
+      username: 'synthetic.admin',
+      permissions: ['client.users.manage_subaccounts'],
+      terminalIds: [],
+    }),
+  );
+  await screen.findByText(/Activation remains disabled/);
+  expect(screen.queryByLabelText(/password/i)).toBeNull();
+});
+it('stops ambiguous merchant creation and never repeats it on focus', async () => {
+  vi.stubGlobal(
+    'confirm',
+    vi.fn(() => true),
+  );
+  vi.mocked(ownerApi.createMerchant).mockRejectedValue(new OwnerApiError(503));
+  render(<OwnerApp />);
+  await openOperators();
+  await userEvent.type(screen.getByLabelText('Immutable merchant code'), 'synthetic-merchant');
+  await userEvent.type(screen.getByLabelText('Merchant display name'), 'Synthetic Merchant');
+  await userEvent.click(screen.getByRole('button', { name: 'Create merchant' }));
+  await screen.findByText(/Reconcile the current merchant or invitation records/);
+  fireEvent.focus(window);
+  expect(ownerApi.createMerchant).toHaveBeenCalledTimes(1);
+  expect(screen.queryByLabelText('Immutable merchant code')).toBeNull();
+});
+it('does not duplicate an in-flight merchant creation or dispatch a cancelled confirmation', async () => {
+  const confirm = vi.fn(() => false);
+  vi.stubGlobal('confirm', confirm);
+  let resolve!: (value: Awaited<ReturnType<typeof ownerApi.createMerchant>>) => void;
+  vi.mocked(ownerApi.createMerchant).mockImplementation(
+    () =>
+      new Promise((r) => {
+        resolve = r;
+      }),
+  );
+  render(<OwnerApp />);
+  await openOperators();
+  const code = screen.getByLabelText('Immutable merchant code');
+  await userEvent.type(code, 'synthetic-merchant');
+  await userEvent.type(screen.getByLabelText('Merchant display name'), 'Synthetic Merchant');
+  await userEvent.click(screen.getByRole('button', { name: 'Create merchant' }));
+  expect(ownerApi.createMerchant).not.toHaveBeenCalled();
+  confirm.mockReturnValue(true);
+  const form = code.closest('form')!;
+  fireEvent.submit(form);
+  fireEvent.submit(form);
+  expect(ownerApi.createMerchant).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    resolve({ operator: { ...operator, version: 1 } });
+    await Promise.resolve();
+  });
 });

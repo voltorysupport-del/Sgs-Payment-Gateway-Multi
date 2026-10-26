@@ -7,7 +7,11 @@ import { runMigrations } from '../../src/db/migrate.js';
 import { createOperatorWithApiKey } from '../../src/db/operator-keys.js';
 import { openTestDatabase } from '../test-database.js';
 import { captureLogger, testConfig } from '../helpers.js';
-import { createOwnerFixture, cleanupOwnerFixture } from '../management-fixtures.js';
+import {
+  createOwnerFixture,
+  cleanupOwnerFixture,
+  managementFixtureGuard,
+} from '../management-fixtures.js';
 import {
   seedViewerFixture,
   cleanupViewerFixture,
@@ -56,6 +60,27 @@ function change(
     .set('X-CSRF-Token', csrf)
     .send(body);
 }
+async function cleanupPendingInvitations(id: string) {
+  const cleanup = await pool.connect();
+  try {
+    await cleanup.query('BEGIN');
+    await managementFixtureGuard(cleanup);
+    await cleanup.query(
+      'ALTER TABLE public.merchant_invitations DISABLE TRIGGER merchant_invitation_history',
+    );
+    await cleanup.query('DELETE FROM public.merchant_invitations WHERE operator_id=$1', [id]);
+    await cleanup.query(
+      'ALTER TABLE public.merchant_invitations ENABLE TRIGGER merchant_invitation_history',
+    );
+    await cleanup.query('COMMIT');
+  } catch (error) {
+    await cleanup.query('ROLLBACK');
+    throw error;
+  } finally {
+    cleanup.release();
+  }
+}
+
 beforeAll(async () => {
   pool = await openTestDatabase();
   await runMigrations(pool);
@@ -421,5 +446,75 @@ it('serializes two owner PATCH requests at the tenant gate and commits one revis
     await holder.query('ROLLBACK');
     holder.release();
     await Promise.allSettled(pending);
+  }
+});
+
+it('creates a merchant without credentials and records a separately authorized pending administrator invitation', async () => {
+  const created = await request(app())
+    .post('/owner-api/clients')
+    .set('Host', 'owner.example.invalid')
+    .set('X-Forwarded-Proto', 'https')
+    .set('Cookie', '__Host-vaultx_owner_session=' + owner.token)
+    .set('Origin', origin)
+    .set('X-CSRF-Token', owner.csrf)
+    .send({
+      code: 'synthetic_created_' + randomUUID().replaceAll('-', ''),
+      name: 'Synthetic Created Merchant',
+    })
+    .expect(201);
+  const id = (created.body as { operator: { id: string; version: number } }).operator.id;
+  try {
+    expect((created.body as { operator: { version: number } }).operator.version).toBe(1);
+    expect(
+      (await pool.query('SELECT count(*) FROM operator_api_keys WHERE operator_id=$1', [id]))
+        .rows[0].count,
+    ).toBe('0');
+    expect(
+      (await pool.query('SELECT count(*) FROM dashboard_memberships WHERE operator_id=$1', [id]))
+        .rows[0].count,
+    ).toBe('0');
+    const manager = await createOwnerFixture(pool, ['platform.clients.manage']);
+    otherOwners.push(manager.id);
+    const postInvite = (token: string, csrf: string) =>
+      request(app())
+        .post('/owner-api/clients/' + id + '/administrator-invitations')
+        .set('Host', 'owner.example.invalid')
+        .set('X-Forwarded-Proto', 'https')
+        .set('Cookie', '__Host-vaultx_owner_session=' + token)
+        .set('Origin', origin)
+        .set('X-CSRF-Token', csrf)
+        .send({
+          username: 'synthetic_admin_' + randomUUID().replaceAll('-', ''),
+          permissions: [
+            'client.users.manage_subaccounts',
+            'client.permissions.delegate',
+            'client.payments.read',
+          ],
+          terminalIds: [],
+        });
+    await postInvite(manager.token, manager.csrf).expect(403);
+    const invite = await postInvite(owner.token, owner.csrf).expect(201);
+    expect(invite.body).toMatchObject({ status: 'pending', activationEnabled: false });
+    expect(JSON.stringify(invite.body)).not.toMatch(/password|token|hash|secret/i);
+    expect(
+      (await pool.query('SELECT count(*) FROM dashboard_memberships WHERE operator_id=$1', [id]))
+        .rows[0].count,
+    ).toBe('0');
+    const evidence = await pool.query(
+      'SELECT action,operator_id,target_version FROM management_audit WHERE actor_id=$1 AND operator_id=$2 ORDER BY occurred_at,id',
+      [owner.id, id],
+    );
+    expect(evidence.rows).toEqual([
+      { action: 'operators.create', operator_id: id, target_version: 1 },
+      { action: 'invitations.create_admin', operator_id: id, target_version: 1 },
+    ]);
+  } finally {
+    // Disposable fixture teardown only; real pending invitations are retained.
+    await cleanupPendingInvitations(id);
+    // Audit FK is removed by normal verified fixture cleanup before operator removal.
+    await cleanupOwnerFixture(pool, owner.id);
+    await pool.query('DELETE FROM operator_permission_entitlements WHERE operator_id=$1', [id]);
+    await pool.query('DELETE FROM operator_access_policies WHERE operator_id=$1', [id]);
+    await pool.query('DELETE FROM operators WHERE id=$1', [id]);
   }
 });

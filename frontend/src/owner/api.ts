@@ -5,10 +5,11 @@ const permission = z.enum([
   'platform.clients.read',
   'platform.clients.manage',
   'platform.audit.read',
+  'platform.clients.bootstrap_admin',
 ]);
 export const ownerIdentitySchema = z.object({
   owner: z.object({ id: uuid, username: z.string().min(1).max(80) }),
-  permissions: z.array(permission).max(3),
+  permissions: z.array(permission).max(4),
 });
 export type OwnerIdentity = z.infer<typeof ownerIdentitySchema>;
 export const operatorSchema = z.object({
@@ -27,7 +28,15 @@ const pagination = z.object({
 export const operatorsSchema = z.object({ operators: z.array(operatorSchema).max(20), pagination });
 const grantSchema = z.object({
   id: uuid,
-  permission: z.enum(['client.payments.read', 'client.status.read']),
+  permission: z.enum([
+    'client.payments.read',
+    'client.status.read',
+    'client.users.read',
+    'client.users.manage_subaccounts',
+    'client.permissions.delegate',
+    'client.audit.read',
+    'client.terminals.read',
+  ]),
   revokedAt: z.iso.datetime().nullable(),
 });
 export const membershipsSchema = z.object({
@@ -60,6 +69,22 @@ export const auditSchema = z.object({
   pagination,
 });
 const operatorResult = z.object({ operator: operatorSchema });
+export const merchantPermissions = [
+  'client.payments.read',
+  'client.status.read',
+  'client.users.read',
+  'client.users.manage_subaccounts',
+  'client.permissions.delegate',
+  'client.audit.read',
+  'client.terminals.read',
+] as const;
+export type MerchantPermission = (typeof merchantPermissions)[number];
+const invitationResult = z.object({
+  invitationId: uuid,
+  expiresAt: z.iso.datetime(),
+  status: z.literal('pending'),
+  activationEnabled: z.literal(false),
+});
 export class OwnerApiError extends Error {
   constructor(public status: number) {
     super(
@@ -142,6 +167,13 @@ export const ownerApi = {
       throw new OwnerApiError(502);
     return data;
   },
+  createMerchant: (body: { code: string; name: string }) =>
+    write('/clients', operatorResult, 'POST', body),
+  inviteAdministrator: (
+    target: string,
+    body: { username: string; permissions: MerchantPermission[]; terminalIds: string[] },
+  ) =>
+    write('/clients/' + id(target) + '/administrator-invitations', invitationResult, 'POST', body),
   updateOperator: (target: string, body: { name: string; expectedVersion: number }) =>
     write('/clients/' + id(target), operatorResult, 'PATCH', body),
   setStatus: (target: string, body: { status: 'active' | 'suspended'; expectedVersion: number }) =>
