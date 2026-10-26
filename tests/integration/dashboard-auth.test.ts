@@ -1,3 +1,10 @@
+import * as permissionModule from '../../src/dashboard/permissions.js';
+import {
+  seedViewerFixture,
+  cleanupViewerFixture,
+  policyQuery,
+  lockPolicyRows,
+} from '../viewer-policy-fixtures.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import request from 'supertest';
@@ -16,6 +23,8 @@ const extraUsers: string[] = [],
   extraOperators: string[] = [];
 const password = 'SYNTHETIC dashboard password only';
 const origin = 'https://dashboard.example.invalid';
+const originalPassword = passwordModule.verifyDashboardPassword;
+const originalIdentity = permissionModule.lockViewerIdentity;
 const logs = captureLogger();
 function app(trusted = '') {
   return createApp({
@@ -72,10 +81,10 @@ beforeEach(async () => {
     'INSERT INTO dashboard_memberships(id, user_id, operator_id) VALUES ($1, $2, $3)',
     [randomUUID(), user, operator],
   );
+  await seedViewerFixture(pool, user);
 });
 afterEach(async () => {
-  for (const id of [user, ...extraUsers])
-    await pool.query('DELETE FROM dashboard_users WHERE id = $1', [id]);
+  for (const id of [user, ...extraUsers]) await cleanupViewerFixture(pool, id);
   for (const id of [operator, ...extraOperators])
     await pool.query('DELETE FROM operators WHERE id = $1', [id]);
   // This suite alone uses auth tables in an independently verified disposable DB.
@@ -209,15 +218,30 @@ it.each(['idle', 'absolute', 'disabled', 'suspended', 'membership', 'version'])(
         [user],
       );
     if (mode === 'disabled')
-      await pool.query("UPDATE dashboard_users SET status = 'disabled' WHERE id = $1", [user]);
+      await policyQuery(
+        pool,
+        operator,
+        "UPDATE dashboard_users SET status = 'disabled' WHERE id = $1",
+        [user],
+      );
     if (mode === 'suspended')
-      await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operator]);
-    if (mode === 'membership')
-      await pool.query('DELETE FROM dashboard_memberships WHERE user_id = $1', [user]);
-    if (mode === 'version')
-      await pool.query('UPDATE dashboard_users SET auth_version = auth_version + 1 WHERE id = $1', [
-        user,
+      await policyQuery(pool, operator, "UPDATE operators SET status = 'suspended' WHERE id = $1", [
+        operator,
       ]);
+    if (mode === 'membership')
+      await policyQuery(
+        pool,
+        operator,
+        "UPDATE dashboard_memberships SET status='disabled' WHERE user_id=$1",
+        [user],
+      );
+    if (mode === 'version')
+      await policyQuery(
+        pool,
+        operator,
+        'UPDATE dashboard_users SET auth_version = auth_version + 1 WHERE id = $1',
+        [user],
+      );
     await request(app()).get('/dashboard-api/auth/me').set('Cookie', c).expect(401);
   },
 );
@@ -237,10 +261,19 @@ it('returns generic failures for unknown, disabled, suspended and incorrect-pass
   const known = await fail(username),
     unknown = await fail('unknown_test');
   expect(known.error.message).toBe(unknown.error.message);
-  await pool.query("UPDATE dashboard_users SET status = 'disabled' WHERE id = $1", [user]);
+  await policyQuery(
+    pool,
+    operator,
+    "UPDATE dashboard_users SET status = 'disabled' WHERE id = $1",
+    [user],
+  );
   await login(p, 401);
-  await pool.query("UPDATE dashboard_users SET status = 'active' WHERE id = $1", [user]);
-  await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operator]);
+  await policyQuery(pool, operator, "UPDATE dashboard_users SET status = 'active' WHERE id = $1", [
+    user,
+  ]);
+  await policyQuery(pool, operator, "UPDATE operators SET status = 'suspended' WHERE id = $1", [
+    operator,
+  ]);
   await login(p, 401);
 });
 it('allows at most one successful concurrent login with a pre-auth token', async () => {
@@ -307,22 +340,26 @@ it('enforces IP limits before allocating unlimited account buckets, ignoring for
 it('password replacement and suspension permanently invalidate previous sessions', async () => {
   const first = await login(undefined, 200),
     c = cookie(first);
-  await pool.query('UPDATE dashboard_users SET password_hash = $2 WHERE id = $1', [
+  await policyQuery(pool, operator, 'UPDATE dashboard_users SET password_hash = $2 WHERE id = $1', [
     user,
     await hashDashboardPassword(password + ' replacement'),
   ]);
   await request(app()).get('/dashboard-api/auth/me').set('Cookie', c).expect(401);
-  await pool.query('UPDATE dashboard_users SET password_hash = $2 WHERE id = $1', [
+  await policyQuery(pool, operator, 'UPDATE dashboard_users SET password_hash = $2 WHERE id = $1', [
     user,
     passwordHash,
   ]);
   await request(app()).get('/dashboard-api/auth/me').set('Cookie', c).expect(401);
   const second = cookie(await login(undefined, 200));
-  await pool.query("UPDATE operators SET status = 'suspended' WHERE id = $1", [operator]);
-  await pool.query("UPDATE operators SET status = 'active' WHERE id = $1", [operator]);
+  await policyQuery(pool, operator, "UPDATE operators SET status = 'suspended' WHERE id = $1", [
+    operator,
+  ]);
+  await policyQuery(pool, operator, "UPDATE operators SET status = 'active' WHERE id = $1", [
+    operator,
+  ]);
   await request(app()).get('/dashboard-api/auth/me').set('Cookie', second).expect(401);
 });
-it('ignores forged operator selection and invalidates replaced memberships', async () => {
+it('ignores forged operator selection, rejects replacement and invalidates disabled memberships', async () => {
   const logged = cookie(await login(undefined, 200));
   const identity = await request(app())
     .get('/dashboard-api/auth/me?operatorId=' + randomUUID())
@@ -330,10 +367,18 @@ it('ignores forged operator selection and invalidates replaced memberships', asy
     .set('X-Operator-Id', randomUUID())
     .expect(200);
   expect((identity.body as { operator: { id: string } }).operator.id).toBe(operator);
-  await pool.query('UPDATE dashboard_memberships SET id = $2 WHERE user_id = $1', [
-    user,
-    randomUUID(),
-  ]);
+  await expect(
+    policyQuery(pool, operator, 'UPDATE dashboard_memberships SET id = $2 WHERE user_id = $1', [
+      user,
+      randomUUID(),
+    ]),
+  ).rejects.toThrow();
+  await policyQuery(
+    pool,
+    operator,
+    "UPDATE dashboard_memberships SET status='disabled' WHERE user_id=$1",
+    [user],
+  );
   await request(app()).get('/dashboard-api/auth/me').set('Cookie', logged).expect(401);
 });
 it('accepts forwarded addresses only through explicitly trusted peers', async () => {
@@ -504,6 +549,7 @@ it.each(['password', 'membership', 'operator'])(
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      await lockPolicyRows(client, operator);
       await client.query(
         'CREATE TEMP TABLE dashboard_sessions(user_id UUID, membership_id UUID) ON COMMIT DROP; CREATE TEMP TABLE dashboard_memberships(id UUID, operator_id UUID) ON COMMIT DROP',
       );
@@ -516,7 +562,7 @@ it.each(['password', 'membership', 'operator'])(
         ]);
       if (mode === 'membership')
         await client.query(
-          "UPDATE public.dashboard_memberships SET role = 'viewer' WHERE user_id = $1",
+          'UPDATE public.dashboard_memberships SET authorization_version=authorization_version+1 WHERE user_id=$1',
           [user],
         );
       if (mode === 'operator')
@@ -572,10 +618,12 @@ it.each(['password', 'membership', 'operator'])(
       pending = login(p);
       await entered.promise;
       if (mode === 'password')
-        await pool.query('UPDATE public.dashboard_users SET password_hash = $2 WHERE id = $1', [
-          user,
-          await hashDashboardPassword(password + ' replacement'),
-        ]);
+        await policyQuery(
+          pool,
+          operator,
+          'UPDATE public.dashboard_users SET password_hash = $2 WHERE id = $1',
+          [user, await hashDashboardPassword(password + ' replacement')],
+        );
       if (mode === 'membership') {
         const other = randomUUID();
         extraOperators.push(other);
@@ -584,15 +632,28 @@ it.each(['password', 'membership', 'operator'])(
           'Reassigned operator',
           'reassigned_' + other,
         ]);
-        await pool.query(
-          'UPDATE public.dashboard_memberships SET operator_id = $2 WHERE user_id = $1',
-          [user, other],
+        await expect(
+          policyQuery(
+            pool,
+            operator,
+            'UPDATE public.dashboard_memberships SET operator_id=$2 WHERE user_id=$1',
+            [user, other],
+          ),
+        ).rejects.toThrow();
+        await policyQuery(
+          pool,
+          operator,
+          "UPDATE public.dashboard_memberships SET status='disabled' WHERE user_id=$1",
+          [user],
         );
       }
       if (mode === 'operator')
-        await pool.query("UPDATE public.operators SET status = 'suspended' WHERE id = $1", [
+        await policyQuery(
+          pool,
           operator,
-        ]);
+          "UPDATE public.operators SET status = 'suspended' WHERE id = $1",
+          [operator],
+        );
       release.resolve();
       expect((await pending).status).toBe(401);
       expect(
@@ -629,6 +690,7 @@ it('keeps two populated users and operator identities independent', async () => 
     'INSERT INTO public.dashboard_memberships(id, user_id, operator_id) VALUES ($1, $2, $3)',
     [randomUUID(), otherUser, otherOperator],
   );
+  await seedViewerFixture(pool, otherUser);
   const first = cookie(await login(undefined, 200)),
     p = await pre();
   const second = cookie(
@@ -654,7 +716,12 @@ it('keeps two populated users and operator identities independent', async () => 
       role: 'viewer',
     });
   }
-  await pool.query('DELETE FROM public.dashboard_memberships WHERE user_id = $1', [user]);
+  await policyQuery(
+    pool,
+    operator,
+    "UPDATE public.dashboard_memberships SET status='disabled' WHERE user_id=$1",
+    [user],
+  );
   await request(app()).get('/dashboard-api/auth/me').set('Cookie', first).expect(401);
   await request(app()).get('/dashboard-api/auth/me').set('Cookie', second).expect(200);
 });
@@ -674,8 +741,8 @@ it('cleans bounded expired batches, preserving current windows, active and locke
     [randomUUID()],
   );
   await pool.query(
-    `INSERT INTO public.dashboard_sessions(token_hash, csrf_hash, user_id, membership_id, auth_version, created_at, last_seen_at)
-    SELECT md5($1 || g::text) || md5(g::text || $1), repeat('a', 64), u.id, m.id, u.auth_version,
+    `INSERT INTO public.dashboard_sessions(token_hash, csrf_hash, user_id, membership_id, auth_version, membership_authz_version, operator_authz_version, created_at, last_seen_at)
+    SELECT md5($1 || g::text) || md5(g::text || $1), repeat('a', 64), u.id, m.id, u.auth_version, m.authorization_version, 1,
       CASE WHEN g = 1 THEN clock_timestamp() - INTERVAL '9 hours' ELSE clock_timestamp() END,
       clock_timestamp() - INTERVAL '31 minutes'
     FROM public.dashboard_users u JOIN public.dashboard_memberships m ON m.user_id = u.id CROSS JOIN generate_series(1, 2) g WHERE u.id = $2`,
@@ -817,3 +884,85 @@ it('initializes the dummy verifier before login DB work and uses it for the firs
     spy.mockRestore();
   }
 });
+
+it.each(['withdrawal-first', 'login-first'])(
+  'serializes final login versus entitlement withdrawal (%s)',
+  async (order) => {
+    const entered = barrier(),
+      release = barrier();
+    const p = await pre();
+    let pending: Promise<request.Response> | undefined;
+    let withdrawal: ReturnType<typeof policyQuery> | undefined;
+    const spy =
+      order === 'withdrawal-first'
+        ? vi
+            .spyOn(passwordModule, 'verifyDashboardPassword')
+            .mockImplementation(async (...args) => {
+              entered.resolve();
+              await release.promise;
+              return originalPassword(...args);
+            })
+        : vi.spyOn(permissionModule, 'lockViewerIdentity').mockImplementation(async (...args) => {
+            const value = await originalIdentity(...args);
+            entered.resolve();
+            await release.promise;
+            return value;
+          });
+    try {
+      pending = login(p);
+      await entered.promise;
+      const change = () =>
+        policyQuery(
+          pool,
+          operator,
+          "UPDATE operator_permission_entitlements SET enabled=false WHERE operator_id=$1 AND permission_code='client.payments.read'",
+          [operator],
+        );
+      if (order === 'withdrawal-first') {
+        await change();
+        release.resolve();
+        const result = await pending;
+        expect(result.status).toBe(200);
+        await request(app())
+          .get('/dashboard-api/auth/me')
+          .set('Cookie', cookie(result))
+          .expect(200);
+        const row = (
+          await pool.query<{ current: boolean }>(
+            `SELECT s.membership_authz_version=m.authorization_version AND s.operator_authz_version=p.authorization_version AS current FROM dashboard_sessions s JOIN dashboard_memberships m ON m.id=s.membership_id JOIN operator_access_policies p ON p.operator_id=m.operator_id WHERE s.user_id=$1`,
+            [user],
+          )
+        ).rows[0];
+        expect(row?.current).toBe(true);
+      } else {
+        withdrawal = change();
+        void withdrawal.catch(() => undefined);
+        let waiting = false;
+        for (let i = 0; i < 100; i++) {
+          const q = await pool.query<{ waiting: boolean }>(
+            "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS waiting",
+          );
+          if (q.rows[0]?.waiting) {
+            waiting = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        expect(waiting).toBe(true);
+        release.resolve();
+        const result = await pending;
+        expect(result.status).toBe(200);
+        await withdrawal;
+        await request(app())
+          .get('/dashboard-api/auth/me')
+          .set('Cookie', cookie(result))
+          .expect(401);
+      }
+    } finally {
+      release.resolve();
+      await pending;
+      await withdrawal;
+      spy.mockRestore();
+    }
+  },
+);

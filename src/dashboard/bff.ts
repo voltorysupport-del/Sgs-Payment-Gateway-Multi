@@ -68,12 +68,25 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
       release();
       if (!res.writableEnded) controller.abort();
     });
+    const permission = /^\/payments(?:\/[^/]+)?\/?$/i.test(req.path)
+      ? 'client.payments.read'
+      : /^\/status\/?$/i.test(req.path)
+        ? 'client.status.read'
+        : undefined;
     const raw = dashboardSessionToken(req);
     const identity = raw
-      ? await touchDashboardSession(pool, createHash('sha256').update(raw).digest('hex'))
+      ? await touchDashboardSession(
+          pool,
+          createHash('sha256').update(raw).digest('hex'),
+          permission,
+        )
       : undefined;
     if (!identity) {
       sendError(res, 401, 'unauthorized', 'Authentication required.');
+      return;
+    }
+    if (!identity.permissionAllowed) {
+      sendError(res, 403, 'forbidden', 'Dashboard read is not permitted.');
       return;
     }
     // Defence in depth even if a Config object bypassed environment validation.
