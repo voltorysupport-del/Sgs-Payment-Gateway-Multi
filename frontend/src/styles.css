@@ -898,3 +898,46 @@ dd {
 .account button {
   flex-shrink: 0;
 }
+
+.passkey-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #0b1120;
+}
+.passkey-card {
+  width: min(100%, 520px);
+  padding: 32px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #121c2e;
+}
+.passkey-card h1 {
+  margin-top: 24px;
+}
+.passkey-card form {
+  display: grid;
+  gap: 10px;
+}
+.passkey-card button {
+  margin: 12px 12px 0 0;
+}
+.passkey-card p {
+  line-height: 1.65;
+}
+.passkey-card input {
+  min-width: 0;
+  width: 100%;
+}
+.invitation-open {
+  margin-top: 16px;
+}
+@media (max-width: 560px) {
+  .passkey-shell {
+    padding: 16px;
+  }
+  .passkey-card {
+    padding: 22px;
+  }
+}

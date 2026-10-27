@@ -3,6 +3,12 @@ export const identitySchema = z.object({
   user: z.object({ id: z.uuid(), username: z.string().max(80) }),
   operator: z.object({ id: z.uuid() }),
   role: z.literal('viewer'),
+  authentication: z.object({
+    passkeyRequired: z.boolean(),
+    passkeyVerified: z.boolean(),
+    passkeyFresh: z.boolean(),
+    passkeysEnabled: z.boolean(),
+  }),
 });
 export type Identity = z.infer<typeof identitySchema>;
 export const paymentSchema = z.object({
@@ -45,7 +51,7 @@ export class ApiError extends Error {
   }
 }
 // Fixed same-origin paths only. No caller-supplied URL, operator, or credential headers.
-async function request<T>(
+export async function request<T>(
   path: string,
   schema: z.ZodType<T>,
   signal?: AbortSignal,

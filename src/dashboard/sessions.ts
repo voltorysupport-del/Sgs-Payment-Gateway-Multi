@@ -24,6 +24,9 @@ export interface DashboardIdentity {
   operator_id: string;
   permissions: ViewerPermission[];
   permissionAllowed: boolean;
+  passkeyRequired: boolean;
+  passkeyVerified: boolean;
+  passkeyFresh: boolean;
 }
 /** Shared pre-gate → policy row → ordered identities/grants → session.
  * Recheck wall-clock expiry AFTER acquiring the session lock, not at transaction start.
@@ -59,12 +62,19 @@ export async function touchDashboardSession(
           row.membership_id,
           row.operator_id,
         );
-        const assurance = await client.query<{ allowed: boolean }>(
-          `SELECT NOT EXISTS(SELECT 1 FROM public.merchant_member_profiles WHERE membership_id=s.membership_id)
-           OR public.dashboard_session_has_webauthn(s) AS allowed FROM public.dashboard_sessions s WHERE s.token_hash=$1`,
+        const assurance = await client.query<{
+          required: boolean;
+          verified: boolean;
+          fresh: boolean;
+        }>(
+          `SELECT EXISTS(SELECT 1 FROM public.merchant_member_profiles WHERE membership_id=s.membership_id) AS required,
+           public.dashboard_session_has_webauthn(s) AS verified,
+           COALESCE(s.webauthn_verified_at>clock_timestamp()-interval '5 minutes',false) AS fresh
+           FROM public.dashboard_sessions s WHERE s.token_hash=$1`,
           [tokenHash],
         );
-        const effective = assurance.rows[0]?.allowed ? permissions : [];
+        const proof = assurance.rows[0];
+        const effective = proof && (!proof.required || proof.verified) ? permissions : [];
         const permissionAllowed = required === undefined || effective.includes(required);
         await client.query(
           'SELECT token_hash FROM public.dashboard_sessions WHERE token_hash = $1 FOR UPDATE /* dashboard-touch-lock */',
@@ -90,6 +100,9 @@ export async function touchDashboardSession(
               operator_id: row.operator_id,
               permissions: effective,
               permissionAllowed,
+              passkeyRequired: proof?.required === true,
+              passkeyVerified: proof?.verified === true,
+              passkeyFresh: proof?.verified === true && proof.fresh,
             }
           : undefined;
       },

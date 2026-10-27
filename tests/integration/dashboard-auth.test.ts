@@ -125,6 +125,12 @@ it('rotates pre-auth tokens, hashes sessions, sets secure cookies, and invalidat
     user: { id: user, username },
     operator: { id: operator },
     role: 'viewer',
+    authentication: {
+      passkeyRequired: false,
+      passkeyVerified: false,
+      passkeyFresh: false,
+      passkeysEnabled: false,
+    },
   });
   await request(app()).get('/payments').set('Cookie', authCookie).expect(401);
   await request(app())
@@ -732,6 +738,12 @@ it('keeps two populated users and operator identities independent', async () => 
       user: { id, username: id === user ? username : otherName },
       operator: { id: op },
       role: 'viewer',
+      authentication: {
+        passkeyRequired: false,
+        passkeyVerified: false,
+        passkeyFresh: false,
+        passkeysEnabled: false,
+      },
     });
   }
   await policyQuery(
