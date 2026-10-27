@@ -399,3 +399,35 @@ it('does not duplicate an in-flight merchant creation or dispatch a cancelled co
     await Promise.resolve();
   });
 });
+
+it('retains an ambiguous merchant-creation outcome after its form is unmounted by navigation', async () => {
+  vi.stubGlobal(
+    'confirm',
+    vi.fn(() => true),
+  );
+  let rejectWrite!: (reason: unknown) => void;
+  vi.mocked(ownerApi.createMerchant).mockImplementation(
+    () =>
+      new Promise((_resolve, reject) => {
+        rejectWrite = reject;
+      }),
+  );
+  render(<OwnerApp />);
+  await openOperators();
+  await userEvent.type(screen.getByLabelText('Immutable merchant code'), 'unconfirmed_merchant');
+  await userEvent.type(
+    screen.getByLabelText('Merchant display name'),
+    'Synthetic unconfirmed merchant',
+  );
+  await userEvent.click(screen.getByRole('button', { name: 'Create merchant' }));
+  await waitFor(() => expect(ownerApi.createMerchant).toHaveBeenCalledTimes(1));
+  await userEvent.click(screen.getByRole('link', { name: 'Audit activity' }));
+  await screen.findByRole('heading', { name: 'Audit activity' });
+  await act(async () => {
+    rejectWrite(new OwnerApiError(503));
+    await Promise.resolve();
+  });
+  await screen.findByText(/Change outcome not confirmed/);
+  expect(screen.queryByRole('heading', { name: 'Audit activity' })).toBeNull();
+  expect(ownerApi.createMerchant).toHaveBeenCalledTimes(1);
+});

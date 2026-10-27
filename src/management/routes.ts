@@ -182,6 +182,7 @@ export function createManagementRouter(pool: Pool, config: Config): Router {
         username: z.string().regex(/^[a-z0-9][a-z0-9_.-]{2,79}$/),
         permissions: z
           .array(z.enum(MERCHANT_PERMISSIONS))
+          .min(1)
           .max(MERCHANT_PERMISSIONS.length)
           .refine((v) => new Set(v).size === v.length),
         terminalIds: z

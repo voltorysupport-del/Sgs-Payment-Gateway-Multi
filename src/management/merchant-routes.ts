@@ -23,6 +23,7 @@ const invitation = z
     username: z.string().regex(/^[a-z0-9][a-z0-9_.-]{2,79}$/),
     permissions: z
       .array(permission)
+      .min(1)
       .max(2)
       .refine((v) => new Set(v).size === v.length),
     terminalIds: z

@@ -1,10 +1,10 @@
-# Runs automatically on every push and every pull request.
+# Feature branches validate through PRs; integration branches also validate on push.
 # A pull request should only be merged into main when both jobs are green.
 name: CI
 
 on:
   push:
-    branches: ['**']
+    branches: [main, 'feature/step-1-project-setup']
   pull_request:
     branches: [main, 'feature/step-1-project-setup', 'feature/management-*', 'feature/phase2-*']
 

@@ -268,13 +268,13 @@ function useOwnerMutation(expired: (notice?: string) => void) {
     try {
       await work();
     } catch (e) {
-      if (!live.current) return;
+      // Uncertain/security outcomes belong to the app, even after this form unmounts.
       if (e instanceof OwnerApiError && (e.status === 401 || e.status === 403)) expired();
       else if (!(e instanceof OwnerApiError) || e.status >= 500)
         expired(
           'Change outcome not confirmed. Do not repeat it. Reconcile the current merchant or invitation records before making another change.',
         );
-      else setError(failure(e));
+      else if (live.current) setError(failure(e));
     } finally {
       if (live.current) {
         pending.current = false;
@@ -453,13 +453,13 @@ function OperatorControls({
       await work();
       if (live.current) changed();
     } catch (e) {
-      if (!live.current) return;
+      // Uncertain/security outcomes belong to the app, even after this form unmounts.
       if (e instanceof OwnerApiError && (e.status === 401 || e.status === 403)) expired();
       else if (!(e instanceof OwnerApiError) || e.status >= 500)
         expired(
           'Change outcome not confirmed. Do not repeat this change. Check the owner session and reload current records before making another change.',
         );
-      else setError(failure(e));
+      else if (live.current) setError(failure(e));
     } finally {
       if (live.current) setPending(false);
     }
@@ -608,13 +608,13 @@ function WithdrawControls({
       await ownerApi.withdraw(operator.id, permission, operator.version);
       if (live.current) changed();
     } catch (e) {
-      if (!live.current) return;
+      // Uncertain/security outcomes belong to the app, even after this form unmounts.
       if (e instanceof OwnerApiError && (e.status === 401 || e.status === 403)) expired();
       else if (!(e instanceof OwnerApiError) || e.status >= 500)
         expired(
           'Change outcome not confirmed. Do not repeat this change. Check the owner session and reload current records before making another change.',
         );
-      else setError(failure(e));
+      else if (live.current) setError(failure(e));
     } finally {
       if (live.current) setBusy(false);
     }

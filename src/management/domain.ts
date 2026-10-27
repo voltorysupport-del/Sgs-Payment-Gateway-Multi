@@ -139,6 +139,7 @@ function valid(command: ManagementCommand): boolean {
   if (
     command.action === 'invitations.create_admin' &&
     (!/^[a-z0-9][a-z0-9_.-]{2,79}$/.test(command.username) ||
+      command.permissions.length === 0 ||
       command.permissions.length > MERCHANT_PERMISSIONS.length ||
       new Set(command.permissions).size !== command.permissions.length ||
       command.permissions.some((p) => !(MERCHANT_PERMISSIONS as readonly string[]).includes(p)) ||

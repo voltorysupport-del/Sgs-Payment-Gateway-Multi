@@ -518,3 +518,23 @@ it('creates a merchant without credentials and records a separately authorized p
     await pool.query('DELETE FROM operators WHERE id=$1', [id]);
   }
 });
+
+it('rejects an empty administrator permission request as invalid input without recording intent', async () => {
+  const before = await pool.query(
+    'SELECT count(*) FROM merchant_invitations WHERE operator_id=$1',
+    [operator],
+  );
+  await request(app())
+    .post('/owner-api/clients/' + operator + '/administrator-invitations')
+    .set('Host', 'owner.example.invalid')
+    .set('X-Forwarded-Proto', 'https')
+    .set('Cookie', '__Host-vaultx_owner_session=' + owner.token)
+    .set('Origin', origin)
+    .set('X-CSRF-Token', owner.csrf)
+    .send({ username: 'synthetic_empty_permissions', permissions: [], terminalIds: [] })
+    .expect(400);
+  expect(
+    (await pool.query('SELECT count(*) FROM merchant_invitations WHERE operator_id=$1', [operator]))
+      .rows,
+  ).toEqual(before.rows);
+});

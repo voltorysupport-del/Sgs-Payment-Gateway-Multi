@@ -278,8 +278,26 @@ it('returns generic failures for unknown, disabled, suspended and incorrect-pass
 });
 it('allows at most one successful concurrent login with a pre-auth token', async () => {
   const p = await pre();
+  // Both requests must pass the pre-auth lookup before either consumes it.
+  // Without this barrier, the loser can correctly fail EARLIER with 403,
+  // which does not exercise the final atomic-consumption race being tested.
+  let entered = 0;
+  let release!: () => void;
+  const bothVerifying = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const verification = vi
+    .spyOn(passwordModule, 'verifyDashboardPassword')
+    .mockImplementation(async (hash, supplied) => {
+      if (++entered === 2) release();
+      await bothVerifying;
+      return originalPassword(hash, supplied);
+    });
   const results = await Promise.all([login(p), login(p)]);
+  verification.mockRestore();
   expect(results.map((r) => r.status).sort()).toEqual([200, 401]);
+  // Replay after consumption is a separate, early pre-auth rejection.
+  await login(p, 403);
   expect(
     (await pool.query('SELECT token_hash FROM dashboard_sessions WHERE user_id = $1', [user]))
       .rowCount,

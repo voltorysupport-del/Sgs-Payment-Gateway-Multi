@@ -111,6 +111,7 @@ it('rejects write requests without same-origin JSON CSRF before dispatch', async
   await post('/invitations', body).set('X-CSRF-Token', 'bad').expect(403);
   await post('/invitations', { ...body, operatorId: member }).expect(400);
   await post('/invitations', { ...body, permissions: ['platform.clients.manage'] }).expect(400);
+  await post('/invitations', { ...body, permissions: [] }).expect(400);
   await post('/invitations', {
     ...body,
     permissions: ['client.payments.read', 'client.payments.read'],
