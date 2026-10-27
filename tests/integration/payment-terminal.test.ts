@@ -6,6 +6,7 @@ import { createApp } from '../../src/app.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { createOperatorWithApiKey } from '../../src/db/operator-keys.js';
 import { createPayment, TerminalUnavailable } from '../../src/db/payments.js';
+import { policyQuery, lockPolicyRows } from '../viewer-policy-fixtures.js';
 import { openTestDatabase } from '../test-database.js';
 import { captureLogger, testConfig } from '../helpers.js';
 
@@ -56,7 +57,7 @@ beforeEach(async () => {
 afterEach(async () => {
   for (const id of [owner, other, readonly].map((o) => o.operatorId)) {
     await pool.query('DELETE FROM public.payments WHERE operator_id=$1', [id]);
-    await pool.query('DELETE FROM public.merchant_terminals WHERE operator_id=$1', [id]);
+    await policyQuery(pool, id, 'DELETE FROM public.merchant_terminals WHERE operator_id=$1', [id]);
     await pool.query('DELETE FROM public.operator_api_keys WHERE operator_id=$1', [id]);
     await pool.query('DELETE FROM public.operators WHERE id=$1', [id]);
   }
@@ -139,9 +140,12 @@ it('includes terminal attribution in idempotency, serializes duplicates, and per
   expect((await post('unattributed-key', terminal)).status).toBe(409);
   const contenders = await Promise.all([post('competing-key', terminal), post('competing-key')]);
   expect(contenders.map((r) => r.status).sort()).toEqual([201, 409]);
-  await pool.query("UPDATE public.merchant_terminals SET status='suspended' WHERE id=$1", [
-    terminal,
-  ]);
+  await policyQuery(
+    pool,
+    owner.operatorId,
+    "UPDATE public.merchant_terminals SET status='suspended' WHERE id=$1",
+    [terminal],
+  );
   expect((await post('same-terminal-key', terminal)).status).toBe(200);
   expect((await post('new-after-suspend', terminal)).status).toBe(400);
 });
@@ -162,14 +166,18 @@ it('database enforces immutable attribution and composite tenant integrity witho
     await expect(pool.query(sql, values)).rejects.toMatchObject({ code: '42501' });
   }
   await expect(
-    pool.query('DELETE FROM public.merchant_terminals WHERE id=$1', [terminal]),
-  ).rejects.toMatchObject({ code: '23503' });
-  await expect(
-    pool.query('UPDATE public.merchant_terminals SET operator_id=$2 WHERE id=$1', [
+    policyQuery(pool, owner.operatorId, 'DELETE FROM public.merchant_terminals WHERE id=$1', [
       terminal,
-      other.operatorId,
     ]),
   ).rejects.toMatchObject({ code: '23503' });
+  await expect(
+    policyQuery(
+      pool,
+      owner.operatorId,
+      'UPDATE public.merchant_terminals SET operator_id=$2 WHERE id=$1',
+      [terminal, other.operatorId],
+    ),
+  ).rejects.toMatchObject({ code: '42501' });
   const unassigned = await post('no-backfill-key');
   await expect(
     pool.query('UPDATE public.payments SET terminal_id=$2 WHERE id=$1', [
@@ -198,6 +206,7 @@ it('suspension winning the row lock rejects waiting creation, without committing
   let pending: Promise<unknown> | undefined;
   try {
     await blocker.query('BEGIN');
+    await lockPolicyRows(blocker, owner.operatorId);
     await blocker.query("UPDATE public.merchant_terminals SET status='suspended' WHERE id=$1", [
       terminal,
     ]);
@@ -243,13 +252,17 @@ it('creation winning the terminal lock commits history before suspension can com
       VALUES($1,$2,100,'EUR','creation-wins',$3)`,
       [payment, owner.operatorId, terminal],
     );
-    pending = disabler.query(
-      "UPDATE public.merchant_terminals SET status='suspended' WHERE id=$1",
-      [terminal],
-    );
+    pending = (async () => {
+      await disabler.query('BEGIN');
+      await lockPolicyRows(disabler, owner.operatorId);
+      await disabler.query("UPDATE public.merchant_terminals SET status='suspended' WHERE id=$1", [
+        terminal,
+      ]);
+    })();
     await blocked(creator, pid);
     await creator.query('COMMIT');
     await pending;
+    await disabler.query('COMMIT');
     expect(
       (await pool.query('SELECT terminal_id FROM public.payments WHERE id=$1', [payment])).rows[0]
         .terminal_id,
@@ -257,6 +270,7 @@ it('creation winning the terminal lock commits history before suspension can com
   } finally {
     await creator.query('ROLLBACK');
     await pending?.catch(() => undefined);
+    await disabler.query('ROLLBACK');
     creator.release();
     disabler.release();
   }

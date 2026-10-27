@@ -48,6 +48,24 @@ export async function cleanupPasskeyFixtures(client: PoolClient, operators: stri
 
 export async function cleanupEnrollmentFixtures(client: PoolClient, operator: string) {
   await managementFixtureGuard(client);
+  await client.query(
+    'ALTER TABLE public.merchant_terminal_assignment_audit DISABLE TRIGGER terminal_assignment_audit_immutable',
+  );
+  await client.query(
+    'ALTER TABLE public.merchant_terminal_assignments DISABLE TRIGGER terminal_assignment_history',
+  );
+  await client.query('DELETE FROM public.merchant_terminal_assignment_audit WHERE operator_id=$1', [
+    operator,
+  ]);
+  await client.query('DELETE FROM public.merchant_terminal_assignments WHERE operator_id=$1', [
+    operator,
+  ]);
+  await client.query(
+    'ALTER TABLE public.merchant_terminal_assignments ENABLE TRIGGER terminal_assignment_history',
+  );
+  await client.query(
+    'ALTER TABLE public.merchant_terminal_assignment_audit ENABLE TRIGGER terminal_assignment_audit_immutable',
+  );
   for (const [table, trigger] of [
     ['merchant_enrollment_audit', 'merchant_enrollment_audit_immutable'],
     ['merchant_invitation_tokens', 'invitation_token_history'],

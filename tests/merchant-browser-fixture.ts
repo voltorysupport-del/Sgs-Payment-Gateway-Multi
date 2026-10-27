@@ -1,3 +1,4 @@
+import { lockPolicyRows } from './viewer-policy-fixtures.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { createMerchant, MERCHANT_PERMISSIONS } from '../src/management/merchant-domain.js';
@@ -99,6 +100,7 @@ export async function cleanupMerchantBrowserFixture(
   try {
     await client.query('BEGIN');
     await managementFixtureGuard(client);
+    await lockPolicyRows(client, fixture.operator);
     await cleanupEnrollmentFixtures(client, fixture.operator);
     await cleanupPasskeyFixtures(client, [fixture.operator]);
     for (const [table, trigger] of [

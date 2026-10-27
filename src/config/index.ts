@@ -31,6 +31,7 @@ const booleanFlag = (name: string) =>
 
 const envSchema = z
   .object({
+    TERMINAL_SCOPED_READS_ENABLED: booleanFlag('TERMINAL_SCOPED_READS_ENABLED'),
     PHASE3_ENROLLMENT_ENABLED: booleanFlag('PHASE3_ENROLLMENT_ENABLED'),
     MERCHANT_MANAGEMENT_ENABLED: booleanFlag('MERCHANT_MANAGEMENT_ENABLED'),
     OWNER_ENABLED: booleanFlag('OWNER_ENABLED'),
@@ -144,6 +145,20 @@ const envSchema = z
   })
   .superRefine((env, ctx) => {
     if (
+      env.TERMINAL_SCOPED_READS_ENABLED &&
+      (env.NODE_ENV === 'production' ||
+        !env.DASHBOARD_BFF_ENABLED ||
+        !env.DASHBOARD_ENABLED ||
+        !env.MERCHANT_MANAGEMENT_ENABLED)
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['TERMINAL_SCOPED_READS_ENABLED'],
+        message:
+          'Terminal read foundation requires non-production dashboard BFF and merchant gates',
+      });
+
+    if (
       env.PHASE3_ENROLLMENT_ENABLED &&
       (env.NODE_ENV === 'production' || !env.DASHBOARD_ENABLED || !env.MERCHANT_MANAGEMENT_ENABLED)
     )
@@ -232,6 +247,7 @@ const envSchema = z
   });
 
 export interface Config {
+  readonly terminalScopedReadsEnabled?: boolean;
   readonly phase3EnrollmentEnabled?: boolean;
   readonly merchantManagementEnabled: boolean;
   readonly ownerEnabled: boolean;
@@ -284,6 +300,7 @@ export function loadConfig(env: EnvSource = process.env): Config {
   const parsed = result.data;
 
   return Object.freeze({
+    terminalScopedReadsEnabled: parsed.TERMINAL_SCOPED_READS_ENABLED,
     phase3EnrollmentEnabled: parsed.PHASE3_ENROLLMENT_ENABLED,
     merchantManagementEnabled: parsed.MERCHANT_MANAGEMENT_ENABLED,
     ownerEnabled: parsed.OWNER_ENABLED,

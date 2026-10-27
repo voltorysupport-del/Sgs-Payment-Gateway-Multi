@@ -796,6 +796,81 @@ it('upgrades populated 008 to 009 without attribution inference and rolls back a
   }
 });
 
+it('upgrades populated 009 to terminal authorization 010 without inventing assignments, and rolls back atomically', async () => {
+  const pool = await openUpgradeDatabase(),
+    client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const name of [
+      '001_initial_schema',
+      '002_operator_api_keys',
+      '003_api_key_permissions',
+      '004_dashboard_auth',
+      '005_viewer_permissions',
+      '006_management_foundation',
+      '007_merchant_lifecycle',
+      '008_invitation_webauthn',
+      '009_payment_terminal_attribution',
+    ])
+      await client.query(
+        await readFile(new URL('../../migrations/' + name + '.sql', import.meta.url), 'utf8'),
+      );
+    const operator = randomUUID(),
+      payment = randomUUID(),
+      terminal = randomUUID();
+    await client.query(
+      "INSERT INTO public.operators(id,code,name) VALUES($1,$2,'Synthetic terminal upgrade')",
+      [operator, 'upgrade_' + operator],
+    );
+    await client.query(
+      "INSERT INTO public.merchant_terminals(id,operator_id,code,name) VALUES($1,$2,'old-terminal','Historical terminal')",
+      [terminal, operator],
+    );
+    await client.query(
+      "INSERT INTO public.payments(id,operator_id,amount_minor,currency,idempotency_key,terminal_id) VALUES($1,$2,100,'EUR','historical-terminal',$3)",
+      [payment, operator, terminal],
+    );
+    const before = (await client.query('SELECT * FROM public.payments WHERE id=$1', [payment]))
+      .rows;
+    const sql = await readFile(
+      new URL('../../migrations/010_terminal_authorization.sql', import.meta.url),
+      'utf8',
+    );
+    await client.query('SAVEPOINT before_010');
+    await client.query(sql);
+    await expect(client.query('SELECT 1/0')).rejects.toThrow();
+    await client.query('ROLLBACK TO SAVEPOINT before_010');
+    expect(
+      (
+        await client.query(
+          "SELECT to_regclass('public.merchant_terminal_assignments') AS assignments,to_regprocedure('public.guard_terminal_lifecycle()') AS guard",
+        )
+      ).rows[0],
+    ).toEqual({ assignments: null, guard: null });
+    await client.query(sql);
+    expect(
+      (await client.query('SELECT * FROM public.payments WHERE id=$1', [payment])).rows,
+    ).toEqual(before);
+    expect(
+      (await client.query('SELECT * FROM public.merchant_terminal_assignments')).rowCount,
+    ).toBe(0);
+    expect(
+      (await client.query('SELECT * FROM public.merchant_terminal_assignment_audit')).rowCount,
+    ).toBe(0);
+    expect(
+      (
+        await client.query(
+          "SELECT prosecdef FROM pg_proc WHERE oid='public.guard_terminal_assignment()'::regprocedure",
+        )
+      ).rows[0].prosecdef,
+    ).toBe(false);
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+    await pool.end();
+  }
+});
+
 it(
   'serializes concurrent migration bootstrap, applies each file once and still propagates real SQL failures',
   { timeout: 20_000 },
@@ -844,6 +919,7 @@ it(
         '007_merchant_lifecycle.sql',
         '008_invitation_webauthn.sql',
         '009_payment_terminal_attribution.sql',
+        '010_terminal_authorization.sql',
       ]);
       await Promise.all(peers.map((peer) => runMigrations(peer)));
       expect(
