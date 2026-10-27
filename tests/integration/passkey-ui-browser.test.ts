@@ -23,6 +23,19 @@ import {
   cleanupMerchantBrowserFixture,
 } from '../merchant-browser-fixture.js';
 
+async function cancelAuthenticationPrompt(page: Page) {
+  // The busy screen precedes identity preflight completion. Wait until the
+  // AbortController-backed ceremony exists; never rely on click timing.
+  const ready = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === '/dashboard-api/auth/passkeys/authentication/options' &&
+      response.status() === 200,
+  );
+  await page.getByRole('button', { name: 'Verify passkey', exact: true }).click();
+  await ready;
+  await page.getByRole('button', { name: 'Cancel browser prompt' }).click();
+}
+
 async function localUi() {
   const pool = await openTestDatabase(),
     directory = await mkdtemp(path.join(tmpdir(), 'vaultx-passkey-ui-'));
@@ -259,8 +272,7 @@ it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
         authenticatorId: f.authenticatorId,
         enabled: false,
       });
-      await f.page.getByRole('button', { name: 'Verify passkey', exact: true }).click();
-      await f.page.getByRole('button', { name: 'Cancel browser prompt' }).click();
+      await cancelAuthenticationPrompt(f.page);
       await browserExpect(f.page.getByRole('alert')).toContainText('cancelled');
       await browserExpect(
         f.page.getByRole('button', { name: 'Verify passkey', exact: true }),
@@ -394,8 +406,7 @@ it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
         authenticatorId: f.authenticatorId,
         enabled: false,
       });
-      await f.page.getByRole('button', { name: 'Verify passkey', exact: true }).click();
-      await f.page.getByRole('button', { name: 'Cancel browser prompt' }).click();
+      await cancelAuthenticationPrompt(f.page);
       await browserExpect(
         f.page.getByRole('button', { name: 'Verify passkey', exact: true }),
       ).toBeDisabled();
