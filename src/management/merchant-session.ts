@@ -142,10 +142,12 @@ export async function executeMerchantCommand(
          JOIN public.operator_access_policies p ON p.operator_id=o.id
          JOIN public.merchant_member_profiles mp ON mp.membership_id=m.id AND mp.operator_id=o.id AND mp.kind='merchant_admin'
          WHERE s.token_hash=$1 AND s.user_id=$2 AND s.membership_id=$3 AND o.id=$4
+         AND public.dashboard_session_has_webauthn(s)
          AND s.auth_version=u.auth_version AND s.membership_authz_version=m.authorization_version AND s.operator_authz_version=p.authorization_version
          AND s.created_at<=clock_timestamp() AND s.last_seen_at<=clock_timestamp()
-         AND s.created_at>clock_timestamp()-interval '8 hours' AND s.last_seen_at>clock_timestamp()-interval '30 minutes'`,
-            [tokenHash, candidate.user_id, candidate.membership_id, tenant],
+         AND s.created_at>clock_timestamp()-interval '8 hours' AND s.last_seen_at>clock_timestamp()-interval '30 minutes'
+         AND (NOT $5::boolean OR s.webauthn_verified_at>clock_timestamp()-interval '5 minutes')`,
+            [tokenHash, candidate.user_id, candidate.membership_id, tenant, writing],
           )
         ).rows[0];
         if (!actor) return deny('unauthorized');

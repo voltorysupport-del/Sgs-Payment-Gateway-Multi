@@ -17,6 +17,10 @@ export async function cleanupDashboardAuth(pool: Pool): Promise<void> {
       SELECT bucket_hash FROM public.dashboard_login_limits WHERE expires_at <= clock_timestamp()
       ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED
     ) DELETE FROM public.dashboard_login_limits l USING expired e WHERE l.bucket_hash = e.bucket_hash`);
+    await client.query(`WITH expired AS (
+      SELECT challenge_hash FROM public.dashboard_webauthn_challenges WHERE expires_at<=clock_timestamp()
+      ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED
+    ) DELETE FROM public.dashboard_webauthn_challenges c USING expired e WHERE c.challenge_hash=e.challenge_hash`);
     await client.query('COMMIT');
   } catch {
     await client.query('ROLLBACK').catch(() => undefined);

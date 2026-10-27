@@ -607,6 +607,116 @@ it('upgrades populated schema 006 to merchant 007 atomically without creating au
   }
 });
 
+it('upgrades populated 007 to 008 without activating accounts, preserves credentials/intents, and rolls back atomically', async () => {
+  const pool = await openUpgradeDatabase(),
+    client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const name of [
+      '001_initial_schema',
+      '002_operator_api_keys',
+      '003_api_key_permissions',
+      '004_dashboard_auth',
+      '005_viewer_permissions',
+      '006_management_foundation',
+      '007_merchant_lifecycle',
+    ])
+      await client.query(
+        await readFile(new URL('../../migrations/' + name + '.sql', import.meta.url), 'utf8'),
+      );
+    const operator = randomUUID(),
+      user = randomUUID(),
+      membership = randomUUID(),
+      owner = randomUUID(),
+      invitation = randomUUID(),
+      key = generateOperatorApiKey();
+    await client.query('INSERT INTO operators(id,code,name) VALUES($1,$2,$3)', [
+      operator,
+      'upgrade_' + operator,
+      'Synthetic pre-008',
+    ]);
+    await client.query('INSERT INTO operator_access_policies(operator_id) VALUES($1)', [operator]);
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended('vaultx.viewer.policy:' || $1::text,0))",
+      [operator],
+    );
+    await client.query(
+      "INSERT INTO operator_permission_entitlements(operator_id,permission_code) VALUES($1,'client.status.read')",
+      [operator],
+    );
+    await client.query('INSERT INTO dashboard_users(id,username,password_hash) VALUES($1,$2,$3)', [
+      user,
+      'existing_' + user,
+      'SYNTHETIC_UNUSABLE_HASH',
+    ]);
+    await client.query(
+      'INSERT INTO dashboard_memberships(id,user_id,operator_id) VALUES($1,$2,$3)',
+      [membership, user, operator],
+    );
+    await client.query(
+      "INSERT INTO membership_permission_grants(id,membership_id,operator_id,permission_code) VALUES($1,$2,$3,'client.status.read')",
+      [randomUUID(), membership, operator],
+    );
+    await client.query(
+      "INSERT INTO operator_api_keys(id,operator_id,name,key_hash,permission) VALUES($1,$2,'Synthetic existing',$3,'read_only')",
+      [randomUUID(), operator, key.keyHash],
+    );
+    await client.query('INSERT INTO owner_principals(id,username) VALUES($1,$2)', [
+      owner,
+      'existing_owner_' + owner,
+    ]);
+    await client.query(
+      "INSERT INTO merchant_invitations(id,operator_id,username,kind,owner_issuer_id,permissions) VALUES($1,$2,$3,'merchant_admin',$4,ARRAY['client.status.read'])",
+      [invitation, operator, 'pending_' + invitation, owner],
+    );
+    const tables = [
+      'dashboard_users',
+      'dashboard_memberships',
+      'operator_api_keys',
+      'membership_permission_grants',
+      'merchant_invitations',
+    ];
+    const before = [];
+    for (const table of tables)
+      before.push(await client.query(`SELECT * FROM public.${table} ORDER BY 1`));
+    const migration = await readFile(
+      new URL('../../migrations/008_invitation_webauthn.sql', import.meta.url),
+      'utf8',
+    );
+    await client.query('SAVEPOINT before_008');
+    await client.query(migration);
+    await expect(client.query('SELECT 1/0')).rejects.toThrow();
+    await client.query('ROLLBACK TO SAVEPOINT before_008');
+    expect(
+      (await client.query("SELECT to_regclass('public.dashboard_passkeys') AS object")).rows[0]
+        .object,
+    ).toBeNull();
+    expect(
+      (
+        await client.query(
+          "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='dashboard_sessions' AND column_name='webauthn_verified_at'",
+        )
+      ).rowCount,
+    ).toBe(0);
+    await client.query(migration);
+    for (let i = 0; i < tables.length; i++)
+      expect((await client.query(`SELECT * FROM public.${tables[i]} ORDER BY 1`)).rows).toEqual(
+        before[i]!.rows,
+      );
+    for (const table of [
+      'dashboard_passkeys',
+      'dashboard_webauthn_challenges',
+      'merchant_invitation_tokens',
+      'merchant_enrollment_audit',
+    ])
+      expect((await client.query(`SELECT * FROM public.${table}`)).rowCount).toBe(0);
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+    await pool.end();
+  }
+});
+
 it(
   'serializes concurrent migration bootstrap, applies each file once and still propagates real SQL failures',
   { timeout: 20_000 },
@@ -653,6 +763,7 @@ it(
         '005_viewer_permissions.sql',
         '006_management_foundation.sql',
         '007_merchant_lifecycle.sql',
+        '008_invitation_webauthn.sql',
       ]);
       await Promise.all(peers.map((peer) => runMigrations(peer)));
       expect(

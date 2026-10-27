@@ -1,3 +1,4 @@
+import { insertAssuredSession, cleanupPasskeyFixtures } from '../passkey-fixtures.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest';
@@ -71,13 +72,14 @@ beforeEach(async () => {
   }
   token = randomBytes(32).toString('hex');
   csrf = randomBytes(32).toString('hex');
-  await insertViewerSession(pool, adminUser, token, csrf);
+  await insertAssuredSession(pool, adminUser, token, csrf);
 });
 afterEach(async () => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await managementFixtureGuard(client);
+    await cleanupPasskeyFixtures(client, [operator, foreign]);
     for (const [table, trigger] of [
       ['merchant_audit', 'merchant_audit_immutable'],
       ['merchant_invitations', 'merchant_invitation_history'],

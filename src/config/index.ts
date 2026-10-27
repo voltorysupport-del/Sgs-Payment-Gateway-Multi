@@ -31,6 +31,7 @@ const booleanFlag = (name: string) =>
 
 const envSchema = z
   .object({
+    PHASE3_ENROLLMENT_ENABLED: booleanFlag('PHASE3_ENROLLMENT_ENABLED'),
     MERCHANT_MANAGEMENT_ENABLED: booleanFlag('MERCHANT_MANAGEMENT_ENABLED'),
     OWNER_ENABLED: booleanFlag('OWNER_ENABLED'),
     OWNER_ORIGIN: z
@@ -142,6 +143,15 @@ const envSchema = z
     SIMULATOR_CONTROLS_ENABLED: booleanFlag('SIMULATOR_CONTROLS_ENABLED'),
   })
   .superRefine((env, ctx) => {
+    if (
+      env.PHASE3_ENROLLMENT_ENABLED &&
+      (env.NODE_ENV === 'production' || !env.DASHBOARD_ENABLED || !env.MERCHANT_MANAGEMENT_ENABLED)
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['PHASE3_ENROLLMENT_ENABLED'],
+        message: 'Requires development/test merchant dashboard; production enrollment is blocked',
+      });
     if (env.MERCHANT_MANAGEMENT_ENABLED) {
       if (env.NODE_ENV === 'production' || !env.DASHBOARD_ENABLED)
         ctx.addIssue({
@@ -222,6 +232,7 @@ const envSchema = z
   });
 
 export interface Config {
+  readonly phase3EnrollmentEnabled?: boolean;
   readonly merchantManagementEnabled: boolean;
   readonly ownerEnabled: boolean;
   readonly ownerOrigin: string | undefined;
@@ -273,6 +284,7 @@ export function loadConfig(env: EnvSource = process.env): Config {
   const parsed = result.data;
 
   return Object.freeze({
+    phase3EnrollmentEnabled: parsed.PHASE3_ENROLLMENT_ENABLED,
     merchantManagementEnabled: parsed.MERCHANT_MANAGEMENT_ENABLED,
     ownerEnabled: parsed.OWNER_ENABLED,
     ownerOrigin: parsed.OWNER_ORIGIN,
