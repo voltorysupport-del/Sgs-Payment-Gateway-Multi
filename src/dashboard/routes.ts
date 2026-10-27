@@ -292,7 +292,18 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
   });
   router.get('/me', async (req, res) => {
     const value = sessionToken(req);
-    const s = value ? await touchDashboardSession(pool, digest(value)) : undefined;
+    const s = value
+      ? await touchDashboardSession(
+          pool,
+          digest(value),
+          undefined,
+          config.terminalScopedReadsEnabled === true &&
+            config.nodeEnv !== 'production' &&
+            config.dashboardEnabled &&
+            config.dashboardBffEnabled &&
+            config.merchantManagementEnabled,
+        )
+      : undefined;
     if (!s) {
       sendError(res, 401, 'unauthorized', 'Authentication required.');
       return;
@@ -301,6 +312,11 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
       user: { id: s.user_id, username: s.username },
       operator: { id: s.operator_id },
       role: 'viewer',
+      readAccess: {
+        scope: s.readScope,
+        payments: s.permissionAllowed && s.permissions.includes('client.payments.read'),
+        status: s.permissionAllowed && s.permissions.includes('client.status.read'),
+      },
       authentication: {
         passkeyRequired: s.passkeyRequired,
         passkeyVerified: s.passkeyVerified,

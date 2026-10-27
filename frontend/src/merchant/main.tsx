@@ -197,7 +197,7 @@ export function MerchantWorkspace({
           )}
         </nav>
         <p>
-          Payment history is available only through the separately configured read-only dashboard.
+          <a href="/dashboard/#/payments">Open read-only payments</a>
         </p>
       </aside>
       <main>
@@ -221,9 +221,8 @@ export function MerchantWorkspace({
         </header>
         <p className="merchant-warning">
           Production enrollment, real invitation delivery and recovery remain disabled. Synthetic
-          invitations use the separately gated test flow. Terminal assignments and terminal-scoped
-          payment reads require a separate reviewed milestone. No real payment operation is
-          available.
+          invitations and terminal-scoped reads remain separately gated and unavailable in
+          production. No real payment operation is available.
         </p>
         {error && <p role="alert">{error}</p>}
         {notice && <p role="status">{notice}</p>}
@@ -499,6 +498,11 @@ export function MerchantApp({ controller = auth }: { controller?: DashboardAuth 
         )}
         {state.phase === 'anonymous' && (
           <button onClick={() => setEnrolling(true)}>Accept a test invitation</button>
+        )}
+        {state.phase === 'authenticated' && (
+          <p>
+            <a href="/dashboard/#/payments">Open read-only payments</a>
+          </p>
         )}
         {state.phase === 'authenticated' && (
           <button onClick={() => void controller.logout()}>Sign out</button>

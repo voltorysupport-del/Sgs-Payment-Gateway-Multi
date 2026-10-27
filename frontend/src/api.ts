@@ -3,6 +3,9 @@ export const identitySchema = z.object({
   user: z.object({ id: z.uuid(), username: z.string().max(80) }),
   operator: z.object({ id: z.uuid() }),
   role: z.literal('viewer'),
+  readAccess: z
+    .object({ scope: z.enum(['operator', 'terminal']), payments: z.boolean(), status: z.boolean() })
+    .optional(),
   authentication: z.object({
     passkeyRequired: z.boolean(),
     passkeyVerified: z.boolean(),
@@ -42,11 +45,13 @@ export class ApiError extends Error {
     super(
       status === 401
         ? 'Your session has expired. Please sign in again.'
-        : status === 429
-          ? 'Too many attempts. Please wait before trying again.'
-          : status === 404
-            ? 'Payment not found.'
-            : 'This request could not be completed. Please try again.',
+        : status === 403
+          ? 'Payment access is not available for this account. Contact your administrator.'
+          : status === 429
+            ? 'Too many attempts. Please wait before trying again.'
+            : status === 404
+              ? 'Payment not found.'
+              : 'This request could not be completed. Please try again.',
     );
   }
 }

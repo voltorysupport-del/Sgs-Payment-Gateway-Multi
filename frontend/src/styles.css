@@ -941,3 +941,21 @@ dd {
     padding: 22px;
   }
 }
+
+.read-freshness {
+  margin: 0;
+  padding: 12px 24px;
+  color: var(--muted, #a6b4cb);
+  font-size: 0.8rem;
+}
+.table-wrap:focus-visible {
+  outline: 2px solid #63b3ff;
+  outline-offset: -2px;
+}
+.access-denied {
+  padding: 32px;
+  max-width: 760px;
+}
+.access-denied p {
+  line-height: 1.7;
+}

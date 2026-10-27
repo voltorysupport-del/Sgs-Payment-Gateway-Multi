@@ -26,6 +26,7 @@ export interface DashboardIdentity {
   permissions: ViewerPermission[];
   permissionAllowed: boolean;
   terminalScope?: TerminalReadScope;
+  readScope: 'operator' | 'terminal';
   passkeyRequired: boolean;
   passkeyVerified: boolean;
   passkeyFresh: boolean;
@@ -68,10 +69,12 @@ export async function touchDashboardSession(
         );
         const assurance = await client.query<{
           required: boolean;
+          terminal: boolean;
           verified: boolean;
           fresh: boolean;
         }>(
           `SELECT EXISTS(SELECT 1 FROM public.merchant_member_profiles WHERE membership_id=s.membership_id) AS required,
+           EXISTS(SELECT 1 FROM public.merchant_member_profiles WHERE membership_id=s.membership_id AND kind='submerchant') AS terminal,
            public.dashboard_session_has_webauthn(s) AS verified,
            COALESCE(s.webauthn_verified_at>clock_timestamp()-interval '5 minutes',false) AS fresh
            FROM public.dashboard_sessions s WHERE s.token_hash=$1`,
@@ -133,6 +136,7 @@ export async function touchDashboardSession(
               permissions: effective,
               ...(terminalScope ? { terminalScope } : {}),
               permissionAllowed,
+              readScope: proof?.terminal ? 'terminal' : 'operator',
               passkeyRequired: proof?.required === true,
               passkeyVerified: proof?.verified === true,
               passkeyFresh: proof?.verified === true && proof.fresh,
