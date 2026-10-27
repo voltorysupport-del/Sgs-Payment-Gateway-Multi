@@ -1,3 +1,4 @@
+import { useProtectedRead } from './use-protected-read';
 import React, { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, ApiError, type Payment } from './api';
@@ -16,11 +17,12 @@ const field = (data: FormData, name: string): string => {
   const value = data.get(name);
   return typeof value === 'string' ? value : '';
 };
-const message = (error: unknown) =>
-  error instanceof ApiError ? error.message : 'Something went wrong. Please try again.';
 export const money = (p: Payment) => {
   // The API stores integer minor units. Do not assume every currency has two decimals.
-  if (!Intl.supportedValuesOf('currency').includes(p.currency))
+  if (
+    typeof Intl.supportedValuesOf !== 'function' ||
+    !Intl.supportedValuesOf('currency').includes(p.currency)
+  )
     return `${p.amountMinor} minor units · ${p.currency}`;
   const formatter = new Intl.NumberFormat(undefined, { style: 'currency', currency: p.currency });
   const digits = formatter.resolvedOptions().maximumFractionDigits ?? 2;
@@ -51,9 +53,11 @@ function Loading() {
 }
 function Table({ payments }: { payments: Payment[] }) {
   return payments.length ? (
-    <div className="table-wrap">
+    <div className="table-wrap" role="region" aria-label="Simulated payment history" tabIndex={0}>
       <table>
-        <caption className="sr-only">Simulated payments on this page</caption>
+        <caption className="sr-only">
+          Simulated payments on this page. Scroll horizontally to see all columns.
+        </caption>
         <thead>
           <tr>
             <th>Transaction</th>
@@ -73,10 +77,14 @@ function Table({ payments }: { payments: Payment[] }) {
                 <span className="payment-icon" aria-hidden="true">
                   →
                 </span>
-                <span className="mono">
+                <a
+                  className="mono"
+                  href={`#/payments/${p.id}`}
+                  aria-label={`${p.id.slice(0, 8)}…${p.id.slice(-4)} — Open payment ${p.id}`}
+                >
                   {p.id.slice(0, 8)}
                   <span className="muted">…{p.id.slice(-4)}</span>
-                </span>
+                </a>
               </td>
               <td className="amount">{money(p)}</td>
               <td>
@@ -85,7 +93,9 @@ function Table({ payments }: { payments: Payment[] }) {
               <td>
                 <span className="muted">Simulator</span>
               </td>
-              <td className="muted">{date(p.createdAt)}</td>
+              <td className="muted">
+                <time dateTime={p.createdAt}>{date(p.createdAt)}</time>
+              </td>
               <td>
                 <a
                   className="detail-link"
@@ -101,7 +111,7 @@ function Table({ payments }: { payments: Payment[] }) {
       </table>
     </div>
   ) : (
-    <div className="empty">
+    <div className="empty" role="status">
       <span aria-hidden="true">◇</span>
       <h3>No payments to show</h3>
       <p>Payments matching these filters will appear here.</p>
@@ -202,68 +212,62 @@ function Login({
     </main>
   );
 }
-function GatewaySummary({ onExpired }: { onExpired: () => void }) {
-  const [state, setState] = useState('Checking gateway…');
-  useEffect(() => {
-    const controller = new AbortController();
-    void api
-      .status(controller.signal)
-      .then(() => {
-        if (!controller.signal.aborted) setState('Gateway responding');
-      })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted) {
-          if (error instanceof ApiError && error.status === 401) onExpired();
-          else setState('Gateway status unavailable');
-        }
-      });
-    return () => controller.abort();
-  }, [onExpired]);
+function GatewaySummary({ onExpired }: { onExpired: (error: unknown) => void }) {
+  const { data, error } = useProtectedRead('summary', api.status, onExpired);
+  const state = data
+    ? 'Gateway responding'
+    : error
+      ? 'Gateway status unavailable'
+      : 'Checking gateway…';
   return (
     <a href="#/status" className="gateway-summary" aria-live="polite">
       ◉ {state} <span>View system status →</span>
     </a>
   );
 }
-function Payments({ overview, onExpired }: { overview: boolean; onExpired: () => void }) {
+function Payments({
+  overview,
+  onExpired,
+  terminal = false,
+  statusAvailable = true,
+}: {
+  overview: boolean;
+  onExpired: (error: unknown) => void;
+  terminal?: boolean;
+  statusAvailable?: boolean;
+}) {
   const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState('');
   const [currency, setCurrency] = useState('');
-  const [data, setData] = useState<Awaited<ReturnType<typeof api.history>>>();
-  const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    setData(undefined);
-    setError('');
-    void api
-      .history(offset, status, currency, controller.signal)
-      .then((value) => {
-        if (!controller.signal.aborted) setData(value);
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) {
-          if (e instanceof ApiError && e.status === 401) onExpired();
-          else setError(message(e));
-        }
-      });
-    return () => controller.abort();
-  }, [offset, status, currency, onExpired, revision]);
+  const read = useCallback(
+    (signal: AbortSignal) => api.history(offset, status, currency, signal),
+    [offset, status, currency],
+  );
+  const { data, error, refreshing } = useProtectedRead(
+    `${offset}:${status}:${currency}:${revision}`,
+    read,
+    onExpired,
+  );
   return (
     <>
       <header className="page-heading">
         <div>
-          <span className="eyebrow">OPERATOR WORKSPACE</span>
+          <span className="eyebrow">
+            {terminal ? 'ASSIGNED TERMINAL ACTIVITY' : 'OPERATOR WORKSPACE'}
+          </span>
           <h1>{overview ? 'Overview' : 'Payments'}</h1>
           <p>
             {overview
-              ? 'Your payment activity, in focus.'
+              ? terminal
+                ? 'Your authorized terminal activity, in focus.'
+                : 'Your payment activity, in focus.'
               : 'Explore your simulated transaction history.'}
           </p>
         </div>
         <span className="read-only">◈ Read-only access</span>
       </header>
-      {overview && <GatewaySummary onExpired={onExpired} />}
+      {overview && statusAvailable && <GatewaySummary onExpired={onExpired} />}
       {overview && data && (
         <div className="stats">
           <article className="stat">
@@ -287,7 +291,11 @@ function Payments({ overview, onExpired }: { overview: boolean; onExpired: () =>
         <div className="panel-heading">
           <div>
             <h2>{overview ? 'Recent transactions' : 'Transaction history'}</h2>
-            <p>Simulator payments for your operator</p>
+            <p>
+              {terminal
+                ? 'Only simulator payments authorized for this account'
+                : 'Simulator payments for your operator'}
+            </p>
           </div>
           <button className="secondary" onClick={() => setRevision((v) => v + 1)}>
             Refresh
@@ -328,6 +336,13 @@ function Payments({ overview, onExpired }: { overview: boolean; onExpired: () =>
         )}
         {error ? <Alert>{error}</Alert> : data ? <Table payments={data.payments} /> : <Loading />}
         {data && (
+          <p className="read-freshness">
+            {refreshing
+              ? 'Checking current access…'
+              : 'Server-verified · rechecked every 15 seconds while visible'}
+          </p>
+        )}
+        {data && (
           <footer className="pagination">
             <span>
               {data.payments.length
@@ -354,31 +369,15 @@ function Payments({ overview, onExpired }: { overview: boolean; onExpired: () =>
         )}
       </section>
       <div className="security-note">
-        ◈ Operator-scoped data · Read-only workspace · Simulator payments only
+        ◈ {terminal ? 'Server-enforced terminal scope' : 'Operator-scoped data'} · Read-only
+        workspace · Simulator payments only
       </div>
     </>
   );
 }
-function Detail({ id, onExpired }: { id: string; onExpired: () => void }) {
-  const [payment, setPayment] = useState<Payment>();
-  const [error, setError] = useState('');
-  useEffect(() => {
-    const controller = new AbortController();
-    setPayment(undefined);
-    setError('');
-    void api
-      .detail(id, controller.signal)
-      .then((p) => {
-        if (!controller.signal.aborted) setPayment(p);
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) {
-          if (e instanceof ApiError && e.status === 401) onExpired();
-          else setError(message(e));
-        }
-      });
-    return () => controller.abort();
-  }, [id, onExpired]);
+function Detail({ id, onExpired }: { id: string; onExpired: (error: unknown) => void }) {
+  const read = useCallback((signal: AbortSignal) => api.detail(id, signal), [id]);
+  const { data: payment, error } = useProtectedRead(id, read, onExpired);
   return (
     <>
       <a className="back" href="#/payments">
@@ -421,24 +420,8 @@ function Detail({ id, onExpired }: { id: string; onExpired: () => void }) {
     </>
   );
 }
-function Status({ onExpired }: { onExpired: () => void }) {
-  const [data, setData] = useState<Awaited<ReturnType<typeof api.status>>>();
-  const [error, setError] = useState('');
-  useEffect(() => {
-    const controller = new AbortController();
-    void api
-      .status(controller.signal)
-      .then((value) => {
-        if (!controller.signal.aborted) setData(value);
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) {
-          if (e instanceof ApiError && e.status === 401) onExpired();
-          else setError(message(e));
-        }
-      });
-    return () => controller.abort();
-  }, [onExpired]);
+function Status({ onExpired }: { onExpired: (error: unknown) => void }) {
+  const { data, error } = useProtectedRead('status', api.status, onExpired);
   return (
     <>
       <header className="page-heading">
@@ -501,7 +484,19 @@ export function App() {
       }
     }
   }, [state.phase, state.identity?.user.id, view, version]);
-  const expire = useCallback(() => auth.expire(version), [auth, version]);
+  const expire = useCallback(
+    (error: unknown) => {
+      if (error instanceof ApiError && error.status === 401) auth.expire(version);
+      else if (!(error instanceof ApiError) || ![400, 404].includes(error.status))
+        auth.suspendReads(
+          version,
+          error instanceof ApiError && error.status === 403
+            ? error.message
+            : 'Payment data could not be verified. Protected records are closed. Check your session before continuing.',
+        );
+    },
+    [auth, version],
+  );
   if (['passkey-required', 'passkey', 'enrollment'].includes(state.phase))
     return <PasskeyGate controller={auth} state={state} />;
   if (state.phase === 'anonymous' && enrolling)
@@ -540,6 +535,7 @@ export function App() {
       />
     );
   const identity = state.identity;
+  const access = identity.readAccess ?? { scope: 'operator', payments: true, status: true };
   return (
     <div className="app-shell" key={`${version}:${identity.user.id}:${identity.operator.id}`}>
       <a
@@ -563,23 +559,30 @@ export function App() {
             ['overview', '◫', 'Overview'],
             ['payments', '⇄', 'Payments'],
             ['status', '◉', 'System status'],
-          ].map(([path, icon, label]) => (
-            <a
-              key={path}
-              href={path === 'overview' ? '#/' : `#/${path}`}
-              aria-current={view.split('/')[0] === path ? 'page' : undefined}
-            >
-              <span aria-hidden="true">{icon}</span>
-              {label}
-            </a>
-          ))}
+          ]
+            .filter(
+              ([path]) =>
+                path === 'overview' || (path === 'payments' ? access.payments : access.status),
+            )
+            .map(([path, icon, label]) => (
+              <a
+                key={path}
+                href={path === 'overview' ? '#/' : `#/${path}`}
+                aria-current={view.split('/')[0] === path ? 'page' : undefined}
+              >
+                <span aria-hidden="true">{icon}</span>
+                {label}
+              </a>
+            ))}
         </nav>
         <div className="sidebar-bottom">
           <span className="mode">● SIMULATOR MODE</span>
           <p>
             No real money movement.
             <br />
-            Read-only operator workspace.
+            {access.scope === 'terminal'
+              ? 'Assigned terminal workspace.'
+              : 'Read-only operator workspace.'}
           </p>
         </div>
       </aside>
@@ -597,7 +600,9 @@ export function App() {
             </span>
             <span>
               {identity.user.username}
-              <small>Operator viewer</small>
+              <small>
+                {access.scope === 'terminal' ? 'Submerchant viewer' : 'Operator viewer'}
+              </small>
             </span>
             <button
               onClick={() => {
@@ -610,14 +615,35 @@ export function App() {
         </header>
         <main id="main-content" tabIndex={-1}>
           <div className="operator-id">
-            Operator <span className="mono">{identity.operator.id}</span>
+            {access.scope === 'terminal' ? (
+              'Assigned-terminal visibility · Verified by the gateway'
+            ) : (
+              <>
+                Operator <span className="mono">{identity.operator.id}</span>
+              </>
+            )}
           </div>
-          {view === 'status' ? (
+          {(view === 'status' && !access.status) || (view !== 'status' && !access.payments) ? (
+            <section className="panel access-denied">
+              <h1>Read access unavailable</h1>
+              <p>
+                This account does not currently have access to this view. Ask your administrator to
+                review access. No payment records are displayed.
+              </p>
+              <button onClick={() => void auth.check(true)}>Check access again</button>
+            </section>
+          ) : view === 'status' ? (
             <Status onExpired={expire} />
           ) : view.startsWith('payments/') ? (
-            <Detail id={view.slice(9)} onExpired={expire} />
+            <Detail key={view} id={view.slice(9)} onExpired={expire} />
           ) : (
-            <Payments key={view} overview={view === 'overview'} onExpired={expire} />
+            <Payments
+              key={view}
+              overview={view === 'overview'}
+              onExpired={expire}
+              terminal={access.scope === 'terminal'}
+              statusAvailable={access.status}
+            />
           )}
         </main>
         <footer className="app-footer">

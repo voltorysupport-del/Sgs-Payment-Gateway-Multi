@@ -872,3 +872,44 @@ it('assignment-audit failure rolls back the entire invitation acceptance without
     await pool.query('DROP SEQUENCE public.synthetic_activation_fault_seen');
   }
 });
+
+it('identity reports only safe display capabilities; it never exposes terminal grants, verifiers or signed handoff context', async () => {
+  const result = await request(app())
+    .get('/dashboard-api/auth/me')
+    .set('Cookie', '__Host-vaultx_session=' + cookie);
+  expect(result.status).toBe(200);
+  expect(result.body.readAccess).toEqual({ scope: 'terminal', payments: true, status: true });
+  expect(Object.keys(result.body).sort()).toEqual([
+    'authentication',
+    'operator',
+    'readAccess',
+    'role',
+    'user',
+  ]);
+  for (const value of [scope.sessionHash, terminal, scope.membershipId, key])
+    expect(JSON.stringify(result.body)).not.toContain(value);
+  const gated = await request(app(false))
+    .get('/dashboard-api/auth/me')
+    .set('Cookie', '__Host-vaultx_session=' + cookie);
+  expect(gated.body.readAccess).toEqual({ scope: 'terminal', payments: false, status: true });
+  await pool.query(
+    'UPDATE public.dashboard_sessions SET webauthn_verified_at=NULL,webauthn_credential_id=NULL WHERE token_hash=$1',
+    [scope.sessionHash],
+  );
+  const passwordOnly = await request(app())
+    .get('/dashboard-api/auth/me')
+    .set('Cookie', '__Host-vaultx_session=' + cookie);
+  expect(passwordOnly.body.readAccess).toEqual({
+    scope: 'terminal',
+    payments: false,
+    status: false,
+  });
+  expect(passwordOnly.body.authentication.passkeyVerified).toBe(false);
+  expect(
+    (
+      await request(app())
+        .get('/dashboard-api/payments')
+        .set('Cookie', '__Host-vaultx_session=' + cookie)
+    ).status,
+  ).toBe(403);
+});

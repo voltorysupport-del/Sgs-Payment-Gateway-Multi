@@ -188,3 +188,39 @@ it('discards the previous workspace when authoritative identity changes, includi
   await screen.findByRole('alert');
   expect(screen.queryByText('€1.00')).toBeNull();
 });
+
+it('uses only server display capabilities for terminal labels and avoids unauthorized status requests', async () => {
+  vi.mocked(api.me).mockResolvedValue({
+    ...identity,
+    readAccess: { scope: 'terminal', payments: true, status: false },
+  });
+  render(<App />);
+  await screen.findByText('€1.00');
+  expect(screen.getByText('Submerchant viewer')).toBeTruthy();
+  expect(screen.getByText('ASSIGNED TERMINAL ACTIVITY')).toBeTruthy();
+  expect(screen.queryByRole('link', { name: 'System status' })).toBeNull();
+  expect(api.status).not.toHaveBeenCalled();
+});
+it('does not request payments for a server-denied workspace, including direct detail navigation', async () => {
+  location.hash = '#/payments/' + payment.id;
+  vi.mocked(api.me).mockResolvedValue({
+    ...identity,
+    readAccess: { scope: 'terminal', payments: false, status: false },
+  });
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Read access unavailable' });
+  expect(api.history).not.toHaveBeenCalled();
+  expect(api.detail).not.toHaveBeenCalled();
+  expect(screen.queryByText('€1.00')).toBeNull();
+});
+it.each([403, 503])(
+  'closes protected identity and payment state for read failure %s',
+  async (status) => {
+    vi.mocked(api.history).mockRejectedValue(new ApiError(status));
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Session needs attention' });
+    expect(screen.queryByText('€1.00')).toBeNull();
+    expect(screen.queryByText(identity.user.username)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Check session again' })).toBeTruthy();
+  },
+);

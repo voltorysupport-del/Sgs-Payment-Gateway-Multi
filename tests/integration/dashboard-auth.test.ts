@@ -125,6 +125,7 @@ it('rotates pre-auth tokens, hashes sessions, sets secure cookies, and invalidat
     user: { id: user, username },
     operator: { id: operator },
     role: 'viewer',
+    readAccess: { scope: 'operator', payments: true, status: true },
     authentication: {
       passkeyRequired: false,
       passkeyVerified: false,
@@ -738,6 +739,7 @@ it('keeps two populated users and operator identities independent', async () => 
       user: { id, username: id === user ? username : otherName },
       operator: { id: op },
       role: 'viewer',
+      readAccess: { scope: 'operator', payments: true, status: true },
       authentication: {
         passkeyRequired: false,
         passkeyVerified: false,

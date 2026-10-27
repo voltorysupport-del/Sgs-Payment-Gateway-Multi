@@ -109,6 +109,7 @@ export class DashboardAuth {
     }
     document.addEventListener('visibilitychange', this.visibility);
     window.addEventListener('pageshow', this.restore);
+    window.addEventListener('pagehide', this.conceal);
     void this.check();
     return () => {
       this.stopped = true;
@@ -117,6 +118,7 @@ export class DashboardAuth {
       this.channel?.close();
       document.removeEventListener('visibilitychange', this.visibility);
       window.removeEventListener('pageshow', this.restore);
+      window.removeEventListener('pagehide', this.conceal);
     };
   }
   private visibility = () => {
@@ -125,6 +127,11 @@ export class DashboardAuth {
       this.invalidate();
       this.set({ phase: 'checking' });
     } else void this.check();
+  };
+  private conceal = () => {
+    if (this.pending || this.blocked) return;
+    this.invalidate();
+    this.set({ phase: 'checking' });
   };
   private restore = () => {
     void this.check();
@@ -169,10 +176,16 @@ export class DashboardAuth {
     this.set({ phase: 'blocked', error });
   }
   version = () => this.epoch;
+  suspendReads = (version: number, error: string) => {
+    if (version !== this.epoch || this.state.phase !== 'authenticated') return;
+    this.block(error);
+    this.notice('auth-unconfirmed');
+  };
   expire = (version: number) => {
     if (version !== this.epoch || this.pending || this.blocked) return;
     this.invalidate();
     this.set({ phase: 'anonymous' });
+    this.notice('auth-changed');
   };
   login = (username: string, password: string) => this.mutate('login', username, password);
   logout = () => this.mutate('logout');
