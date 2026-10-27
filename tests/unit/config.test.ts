@@ -197,3 +197,39 @@ describe('merchant management development gate', () => {
     expect(problems.some((p) => p.startsWith('MERCHANT_MANAGEMENT_ENABLED'))).toBe(true);
   });
 });
+
+describe('synthetic Phase 3 enrollment gate', () => {
+  it('defaults off with existing dashboard/live gates off', () => {
+    const config = loadConfig(VALID_ENV);
+    expect(config.phase3EnrollmentEnabled).toBe(false);
+    expect(config.dashboardEnabled).toBe(false);
+    expect(config.dashboardBffEnabled).toBe(false);
+    expect(config.liveModeEnabled).toBe(false);
+  });
+  it('requires development/test merchant authentication and refuses production', () => {
+    expect(
+      problemsFor({ ...VALID_ENV, PHASE3_ENROLLMENT_ENABLED: 'true' }).some((p) =>
+        p.startsWith('PHASE3_ENROLLMENT_ENABLED'),
+      ),
+    ).toBe(true);
+    expect(
+      problemsFor({
+        ...VALID_ENV,
+        NODE_ENV: 'production',
+        PHASE3_ENROLLMENT_ENABLED: 'true',
+        DASHBOARD_ENABLED: 'true',
+        MERCHANT_MANAGEMENT_ENABLED: 'true',
+        DASHBOARD_PUBLIC_ORIGIN: 'https://dashboard.example.invalid',
+      }).some((p) => p.startsWith('PHASE3_ENROLLMENT_ENABLED')),
+    ).toBe(true);
+    expect(
+      loadConfig({
+        ...VALID_ENV,
+        PHASE3_ENROLLMENT_ENABLED: 'true',
+        DASHBOARD_ENABLED: 'true',
+        MERCHANT_MANAGEMENT_ENABLED: 'true',
+        DASHBOARD_PUBLIC_ORIGIN: 'https://dashboard.example.invalid',
+      }).phase3EnrollmentEnabled,
+    ).toBe(true);
+  });
+});

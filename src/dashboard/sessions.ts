@@ -59,7 +59,13 @@ export async function touchDashboardSession(
           row.membership_id,
           row.operator_id,
         );
-        const permissionAllowed = required === undefined || permissions.includes(required);
+        const assurance = await client.query<{ allowed: boolean }>(
+          `SELECT NOT EXISTS(SELECT 1 FROM public.merchant_member_profiles WHERE membership_id=s.membership_id)
+           OR public.dashboard_session_has_webauthn(s) AS allowed FROM public.dashboard_sessions s WHERE s.token_hash=$1`,
+          [tokenHash],
+        );
+        const effective = assurance.rows[0]?.allowed ? permissions : [];
+        const permissionAllowed = required === undefined || effective.includes(required);
         await client.query(
           'SELECT token_hash FROM public.dashboard_sessions WHERE token_hash = $1 FOR UPDATE /* dashboard-touch-lock */',
           [tokenHash],
@@ -82,7 +88,7 @@ export async function touchDashboardSession(
               user_id: row.user_id,
               username: identity.user.username,
               operator_id: row.operator_id,
-              permissions,
+              permissions: effective,
               permissionAllowed,
             }
           : undefined;

@@ -1,3 +1,4 @@
+import { createPasskeyRouter } from '../enrollment/routes.js';
 import { isIP } from 'node:net';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { json, Router, type Request, type ErrorRequestHandler } from 'express';
@@ -114,6 +115,23 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
     }
     next();
   });
+  if (
+    config.phase3EnrollmentEnabled &&
+    config.nodeEnv !== 'production' &&
+    config.merchantManagementEnabled
+  )
+    router.use(
+      '/passkeys',
+      createPasskeyRouter(pool, config, {
+        authorize: async (req) => {
+          const s = await session(pool, req);
+          return s && csrf(req, s, config.dashboardPublicOrigin!)
+            ? { hash: s.token_hash, authenticated: s.user_id !== null }
+            : undefined;
+        },
+        admit: (req) => rate(pool, 'passkey-ip:' + clientAddress(req), 30),
+      }),
+    );
   router.use(json({ limit: '4kb' }));
   router.get('/csrf', async (req, res) => {
     // No cross-origin token vending, even if CORS is accidentally enabled later.

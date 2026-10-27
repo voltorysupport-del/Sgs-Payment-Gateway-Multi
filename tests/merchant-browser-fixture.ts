@@ -6,7 +6,11 @@ import {
   cleanupOwnerFixture,
   managementFixtureGuard,
 } from './management-fixtures.js';
-import { insertViewerSession } from './viewer-policy-fixtures.js';
+import {
+  insertAssuredSession,
+  cleanupPasskeyFixtures,
+  cleanupEnrollmentFixtures,
+} from './passkey-fixtures.js';
 /** Synthetic schema-owner fixture, only after the disposable database guard.
  * Does NOT represent an approved production enrollment or activation ceremony.
  */
@@ -68,7 +72,7 @@ export async function createMerchantBrowserFixture(pool: Pool) {
   }
   const token = randomBytes(32).toString('hex'),
     csrf = randomBytes(32).toString('hex');
-  await insertViewerSession(
+  await insertAssuredSession(
     pool,
     user,
     createHash('sha256').update(token).digest('hex'),
@@ -95,6 +99,8 @@ export async function cleanupMerchantBrowserFixture(
   try {
     await client.query('BEGIN');
     await managementFixtureGuard(client);
+    await cleanupEnrollmentFixtures(client, fixture.operator);
+    await cleanupPasskeyFixtures(client, [fixture.operator]);
     for (const [table, trigger] of [
       ['merchant_audit', 'merchant_audit_immutable'],
       ['merchant_member_profiles', 'merchant_profile_history'],
