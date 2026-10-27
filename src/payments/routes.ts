@@ -10,6 +10,7 @@ import {
   getPayment,
   listPayments,
   PaymentConflict,
+  TerminalUnavailable,
   simulatePayment,
 } from '../db/payments.js';
 import { sendError } from '../shared/http-errors.js';
@@ -18,6 +19,10 @@ const paymentSchema = z
   .object({
     amountMinor: z.number().int().positive().max(100_000_000),
     currency: z.string().regex(/^[A-Z]{3}$/),
+    terminalId: z
+      .uuid()
+      .transform((id) => id.toLowerCase())
+      .optional(),
   })
   .strict();
 const idempotencySchema = z
@@ -86,6 +91,7 @@ export function createPaymentsRouter(pool: Pool): Router {
       key.data,
       body.data.amountMinor,
       body.data.currency,
+      body.data.terminalId,
     );
     res.status(result.created ? 201 : 200).json(result.payment);
   });
@@ -136,6 +142,10 @@ export function createPaymentsRouter(pool: Pool): Router {
   const conflictHandler: ErrorRequestHandler = (error: unknown, _req, res, next) => {
     if (error instanceof ReadUnavailable || error instanceof InvalidReadRestriction) {
       sendError(res, 503, 'unavailable', 'Payment reads temporarily unavailable.');
+      return;
+    }
+    if (error instanceof TerminalUnavailable) {
+      sendError(res, 400, 'invalid_terminal', 'The requested terminal is unavailable.');
       return;
     }
     if (error instanceof PaymentConflict) {
