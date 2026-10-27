@@ -172,3 +172,43 @@ it('uses server freshness to keep merchant administration closed for stale assur
   stops.push(controller.start());
   await vi.waitFor(() => expect(controller.snapshot().phase).toBe('passkey-required'));
 });
+it('a broadcast cannot clear local cancellation, and joining an existing session is not a fresh password login', async () => {
+  const channels: { onmessage: ((event: MessageEvent<unknown>) => void) | null }[] = [];
+  vi.stubGlobal(
+    'BroadcastChannel',
+    class {
+      onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+      constructor() {
+        channels.push(this);
+      }
+      postMessage() {}
+      close() {}
+    },
+  );
+  const me = vi.fn().mockResolvedValue(identity),
+    passwordLogin = vi.fn().mockResolvedValue(undefined);
+  const ceremonies = {
+    enroll: vi.fn(),
+    authenticate: vi.fn().mockRejectedValue(new PasskeyError('cancelled')),
+  };
+  const controller = new DashboardAuth({ ...api, me, login: passwordLogin }, ceremonies);
+  stops.push(controller.start());
+  await vi.waitFor(() => expect(controller.snapshot().phase).toBe('passkey-required'));
+  await controller.verifyPasskey();
+  expect(controller.snapshot().needsRestart).toBe(true);
+  channels[0]!.onmessage?.({ data: 'auth-changed' } as MessageEvent<unknown>);
+  await vi.waitFor(() => expect(controller.snapshot().phase).toBe('passkey-required'));
+  expect(controller.snapshot().needsRestart).toBe(true);
+  // A stale anonymous UI can discover the same already-authenticated cookie.
+  // It must not pretend a new password login occurred.
+  controller.expire(controller.version());
+  await controller.login('synthetic-admin', 'Synthetic password only!');
+  expect(passwordLogin).not.toHaveBeenCalled();
+  expect(controller.snapshot().needsRestart).toBe(true);
+  // Only an actual password login AND its successful server identity read reset.
+  controller.expire(controller.version());
+  me.mockRejectedValueOnce(new ApiError(401));
+  await controller.login('synthetic-admin', 'Synthetic password only!');
+  expect(passwordLogin).toHaveBeenCalledOnce();
+  expect(controller.snapshot().needsRestart).toBe(false);
+});

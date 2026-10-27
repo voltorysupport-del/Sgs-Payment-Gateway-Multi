@@ -72,7 +72,12 @@ Cancel browser prompt aborts only the native authenticator operation. It does no
 abort a submitted cookie-changing/verification HTTP request: that must settle to
 avoid late-cookie/session races. App-owned operations outlive screen transitions.
 The existing controller checks session changes across tabs and on visibility/page
-restoration. Reloading discards in-memory warnings; immutable server token
+restoration. Broadcasts only request reconciliation; they never clear a local
+cancelled-ceremony restriction. The cancelling tab must perform its own fresh
+password login and confirm its server identity before starting another ceremony.
+Discovering an already-authenticated shared cookie does not count as a new login.
+Normal cross-tab logout and already server-verified sessions still synchronize.
+Reloading discards in-memory warnings; immutable server token
 consumption still rejects replay and prevents duplicate accounts. No persistent
 secret or token-specific recovery journal is added. A cancelled registration can
 leave an unregistered credential in a native authenticator; the app cannot delete

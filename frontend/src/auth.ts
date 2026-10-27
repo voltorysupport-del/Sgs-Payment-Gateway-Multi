@@ -102,7 +102,8 @@ export class DashboardAuth {
           this.block('Session change could not be confirmed. Check the session before continuing.');
           return;
         }
-        if (event.data === 'auth-changed') this.ceremonyUsed = false;
+        // A cross-tab notice is only a request to reconcile. It is not proof
+        // of a fresh password session and cannot reset a cancelled ceremony.
         void this.check();
       };
     }
@@ -212,6 +213,9 @@ export class DashboardAuth {
           }
           if (!existing) await this.client.login(username!, password!);
           const identity = existing ?? (await this.client.me());
+          // Reset only after this tab actually completed password login AND
+          // confirmed its server identity. Joining an existing cookie is not login.
+          if (!existing) this.ceremonyUsed = false;
           this.notice('auth-changed');
           if (epoch === this.epoch && !this.stopped)
             this.set(this.visible() ? this.identityState(identity) : { phase: 'checking' });

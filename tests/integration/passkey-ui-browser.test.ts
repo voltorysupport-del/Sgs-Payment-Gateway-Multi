@@ -372,3 +372,180 @@ it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
   },
   60000,
 );
+it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
+  'another tab cannot re-enable a cancelled passkey ceremony with a broadcast alone; a fresh local password login and cross-tab logout still work',
+  async () => {
+    const f = await localUi();
+    try {
+      let logins = 0,
+        options = 0,
+        verifications = 0;
+      f.context.on('request', (req) => {
+        const path = new URL(req.url()).pathname;
+        if (path === '/dashboard-api/auth/login') logins++;
+        if (path.endsWith('/passkeys/authentication/options')) options++;
+        if (path.endsWith('/passkeys/authentication/verify')) verifications++;
+      });
+      await f.page.goto(f.origin + '/merchant/');
+      await fillInvitation(f.page, f.token, f.password);
+      await browserExpect(f.page.getByRole('status')).toContainText('Passkey enrollment completed');
+      await login(f.page, f.username, f.password);
+      await f.cdp.send('WebAuthn.setAutomaticPresenceSimulation', {
+        authenticatorId: f.authenticatorId,
+        enabled: false,
+      });
+      await f.page.getByRole('button', { name: 'Verify passkey', exact: true }).click();
+      await f.page.getByRole('button', { name: 'Cancel browser prompt' }).click();
+      await browserExpect(
+        f.page.getByRole('button', { name: 'Verify passkey', exact: true }),
+      ).toBeDisabled();
+      const other = await f.context.newPage();
+      await other.goto(f.origin + '/merchant/');
+      await browserExpect(
+        other.getByRole('heading', { name: 'Passkey verification required' }),
+      ).toBeVisible();
+      await f.page.bringToFront();
+      await browserExpect(
+        f.page.getByRole('button', { name: 'Verify passkey', exact: true }),
+      ).toBeDisabled();
+      const rechecked = f.page.waitForResponse(
+        (r) =>
+          new URL(r.url()).pathname === '/dashboard-api/auth/me' && r.request().method() === 'GET',
+      );
+      await other.evaluate(() => {
+        const channel = new BroadcastChannel('vaultx-dashboard-session');
+        channel.postMessage('auth-changed');
+        channel.close();
+      });
+      await rechecked;
+      await browserExpect(
+        f.page.getByRole('button', { name: 'Verify passkey', exact: true }),
+      ).toBeDisabled();
+      expect(logins).toBe(1);
+      expect(options).toBe(1);
+      expect(verifications).toBe(0);
+      expect(
+        (
+          (await (await f.context.request.get(f.origin + '/dashboard-api/auth/me')).json()) as {
+            authentication: { passkeyVerified: boolean };
+          }
+        ).authentication.passkeyVerified,
+      ).toBe(false);
+      await f.page.getByRole('button', { name: 'Sign out', exact: true }).click();
+      await login(f.page, f.username, f.password);
+      await browserExpect(
+        f.page.getByRole('button', { name: 'Verify passkey', exact: true }),
+      ).toBeEnabled();
+      await f.cdp.send('WebAuthn.setAutomaticPresenceSimulation', {
+        authenticatorId: f.authenticatorId,
+        enabled: true,
+      });
+      await f.page.getByRole('button', { name: 'Verify passkey', exact: true }).click();
+      await browserExpect(
+        f.page.getByRole('heading', { name: 'Authorized merchant workspace' }),
+      ).toBeVisible();
+      await other.bringToFront();
+      await browserExpect(
+        other.getByRole('heading', { name: 'Authorized merchant workspace' }),
+      ).toBeVisible();
+      await other.getByRole('button', { name: 'Sign out', exact: true }).click();
+      await f.page.bringToFront();
+      await browserExpect(f.page.getByRole('form', { name: 'Merchant sign-in' })).toBeVisible();
+      await browserExpect(f.page.getByText(f.username, { exact: true })).toHaveCount(0);
+      expect(logins).toBe(2);
+      expect(verifications).toBe(1);
+    } finally {
+      await f.close();
+    }
+  },
+  60000,
+);
+function rendezvous() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
+  'cancelling after authentication verification was submitted does not abort, duplicate or open protected UI before settlement',
+  async () => {
+    const f = await localUi(),
+      entered = rendezvous(),
+      release = rendezvous();
+    try {
+      await f.page.goto(f.origin + '/merchant/');
+      await fillInvitation(f.page, f.token, f.password);
+      await browserExpect(f.page.getByRole('status')).toContainText('Passkey enrollment completed');
+      await login(f.page, f.username, f.password);
+      let verifies = 0;
+      await f.context.route(
+        '**/dashboard-api/auth/passkeys/authentication/verify',
+        async (route) => {
+          verifies++;
+          const response = await route.fetch();
+          expect(response.status()).toBe(200);
+          entered.resolve();
+          await release.promise;
+          await route.fulfill({ response });
+        },
+      );
+      await f.page.getByRole('button', { name: 'Verify passkey', exact: true }).click();
+      await entered.promise;
+      await f.page.getByRole('button', { name: 'Cancel browser prompt' }).click();
+      await browserExpect(
+        f.page.getByRole('heading', { name: 'Verify your passkey' }),
+      ).toBeVisible();
+      await browserExpect(
+        f.page.getByRole('heading', { name: 'Authorized merchant workspace' }),
+      ).toHaveCount(0);
+      expect(verifies).toBe(1);
+      release.resolve();
+      await browserExpect(
+        f.page.getByRole('heading', { name: 'Authorized merchant workspace' }),
+      ).toBeVisible();
+      expect(verifies).toBe(1);
+    } finally {
+      release.resolve();
+      await f.close();
+    }
+  },
+  60000,
+);
+it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
+  'an ambiguous authentication response keeps protected views closed until an explicit server-assurance check',
+  async () => {
+    const f = await localUi();
+    try {
+      await f.page.goto(f.origin + '/merchant/');
+      await fillInvitation(f.page, f.token, f.password);
+      await browserExpect(f.page.getByRole('status')).toContainText('Passkey enrollment completed');
+      await login(f.page, f.username, f.password);
+      let verifies = 0;
+      await f.context.route(
+        '**/dashboard-api/auth/passkeys/authentication/verify',
+        async (route) => {
+          verifies++;
+          const response = await route.fetch();
+          expect(response.status()).toBe(200);
+          // Preserve actual Set-Cookie but lose the successful JSON acknowledgement.
+          await route.fulfill({ response, body: 'Malformed synthetic acknowledgement' });
+        },
+      );
+      await f.page.getByRole('button', { name: 'Verify passkey', exact: true }).click();
+      await browserExpect(f.page.getByRole('alert')).toContainText('could not be confirmed');
+      await browserExpect(
+        f.page.getByRole('heading', { name: 'Authorized merchant workspace' }),
+      ).toHaveCount(0);
+      expect(verifies).toBe(1);
+      await f.page.getByRole('button', { name: 'Check session', exact: true }).click();
+      await browserExpect(
+        f.page.getByRole('heading', { name: 'Authorized merchant workspace' }),
+      ).toBeVisible();
+      expect(verifies).toBe(1);
+    } finally {
+      await f.close();
+    }
+  },
+  60000,
+);
