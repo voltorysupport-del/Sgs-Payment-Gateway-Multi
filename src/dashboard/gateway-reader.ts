@@ -1,4 +1,4 @@
-import { signReadRestriction } from '../payments/internal-read.js';
+import { type TerminalReadScope, signReadRestriction } from '../payments/internal-read.js';
 import http from 'node:http';
 import { z } from 'zod';
 import { paymentHistoryQuerySchema } from '../payments/history-contract.js';
@@ -48,10 +48,11 @@ export async function readGateway(
   read: GatewayRead,
   expectedOperatorId: string,
   signal?: AbortSignal,
+  scope?: TerminalReadScope,
 ): Promise<unknown> {
   const path = readPath(read);
   if (signal?.aborted) throw new GatewayReadError(503);
-  const restrictions = signReadRestriction(path, apiKey, expectedOperatorId);
+  const restrictions = signReadRestriction(path, apiKey, expectedOperatorId, scope);
   const agent = new http.Agent({ keepAlive: false });
   try {
     return await new Promise((resolve, reject) => {

@@ -79,6 +79,11 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
           pool,
           createHash('sha256').update(raw).digest('hex'),
           permission,
+          config.terminalScopedReadsEnabled === true &&
+            config.nodeEnv !== 'production' &&
+            config.dashboardEnabled &&
+            config.dashboardBffEnabled &&
+            config.merchantManagementEnabled,
         )
       : undefined;
     if (!identity) {
@@ -110,6 +115,7 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
       sendError(res, 503, 'unavailable', 'Dashboard reads unavailable.');
       return;
     }
+    res.locals.terminalScope = identity.terminalScope;
     next();
   });
   router.get('/payments', async (req, res) => {
@@ -128,6 +134,8 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
         },
         config.dashboardOperatorId!,
         res.locals.readSignal as AbortSignal,
+        res.locals.terminalScope as
+          import('../payments/internal-read.js').TerminalReadScope | undefined,
       ),
     );
     if (
@@ -158,6 +166,8 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
         },
         config.dashboardOperatorId!,
         res.locals.readSignal as AbortSignal,
+        res.locals.terminalScope as
+          import('../payments/internal-read.js').TerminalReadScope | undefined,
       ),
     );
     if (!value.success || value.data.id !== id.data) throw new GatewayReadError(502);
@@ -176,6 +186,8 @@ export function createDashboardBff(pool: Pool, config: Config): Router {
           { kind: 'health' },
           config.dashboardOperatorId!,
           res.locals.readSignal as AbortSignal,
+          res.locals.terminalScope as
+            import('../payments/internal-read.js').TerminalReadScope | undefined,
         ),
       ).success
     )

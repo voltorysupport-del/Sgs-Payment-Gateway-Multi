@@ -52,6 +52,7 @@ export async function effectiveViewerPermissions(
   client: PoolClient,
   membershipId: string,
   operatorId: string,
+  allowTerminalReads = false,
 ): Promise<ViewerPermission[]> {
   const profile = await client.query<{ kind: string }>(
     'SELECT kind FROM public.merchant_member_profiles WHERE membership_id=$1 AND operator_id=$2',
@@ -59,13 +60,17 @@ export async function effectiveViewerPermissions(
   );
   if (profile.rows[0]) {
     const permissions = await effectiveMerchantPermissions(client, membershipId, operatorId);
-    // The current signed BFF contract scopes an entire operator, not terminals.
-    // Never give terminal-restricted subjects this broader payment read path.
-    // A future reviewed terminal-aware handoff is required before enabling it.
+    // Submerchants remain denied by default. Only the gated BFF admission may
+    // evaluate their grants; the final signed handoff independently validates
+    // canonical terminal assignments, session assurance and live authorization.
     return VIEWER_PERMISSIONS.filter(
       (permission) =>
         permissions.includes(permission) &&
-        !(profile.rows[0]!.kind === 'submerchant' && permission === 'client.payments.read'),
+        !(
+          profile.rows[0]!.kind === 'submerchant' &&
+          permission === 'client.payments.read' &&
+          !allowTerminalReads
+        ),
     );
   }
   const result = await client.query<{ permission_code: string }>(

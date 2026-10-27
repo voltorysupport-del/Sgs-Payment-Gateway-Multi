@@ -1,3 +1,4 @@
+import type { TerminalReadScope } from '../payments/internal-read.js';
 import type { Request } from 'express';
 import { withReadClient } from '../db/read-client.js';
 import {
@@ -24,6 +25,7 @@ export interface DashboardIdentity {
   operator_id: string;
   permissions: ViewerPermission[];
   permissionAllowed: boolean;
+  terminalScope?: TerminalReadScope;
   passkeyRequired: boolean;
   passkeyVerified: boolean;
   passkeyFresh: boolean;
@@ -35,6 +37,7 @@ export async function touchDashboardSession(
   pool: Pool,
   tokenHash: string,
   required?: ViewerPermission,
+  allowTerminalReads = false,
 ): Promise<DashboardIdentity | undefined> {
   try {
     return await withReadClient(
@@ -61,6 +64,7 @@ export async function touchDashboardSession(
           client,
           row.membership_id,
           row.operator_id,
+          allowTerminalReads,
         );
         const assurance = await client.query<{
           required: boolean;
@@ -75,7 +79,35 @@ export async function touchDashboardSession(
         );
         const proof = assurance.rows[0];
         const effective = proof && (!proof.required || proof.verified) ? permissions : [];
-        const permissionAllowed = required === undefined || effective.includes(required);
+        let terminalScope: TerminalReadScope | undefined;
+        let scopeAllowed = true;
+        if (
+          allowTerminalReads &&
+          (
+            await client.query(
+              "SELECT 1 FROM public.merchant_member_profiles WHERE membership_id=$1 AND kind='submerchant'",
+              [row.membership_id],
+            )
+          ).rowCount
+        ) {
+          const terminals = await client.query<{ terminal_id: string }>(
+            `SELECT a.terminal_id FROM public.merchant_terminal_assignments a JOIN public.merchant_terminals t ON t.id=a.terminal_id AND t.operator_id=a.operator_id AND t.status='active'
+            WHERE a.membership_id=$1 AND a.operator_id=$2 AND a.revoked_at IS NULL ORDER BY a.terminal_id`,
+            [row.membership_id, row.operator_id],
+          );
+          scopeAllowed =
+            terminals.rows.length > 0 && terminals.rows.length <= 100 && proof?.verified === true;
+          terminalScope = {
+            userId: row.user_id,
+            membershipId: row.membership_id,
+            sessionHash: tokenHash,
+            membershipVersion: identity.membershipVersion,
+            operatorVersion: identity.operatorVersion,
+            terminalIds: terminals.rows.map((t) => t.terminal_id),
+          };
+        }
+        const permissionAllowed =
+          (required === undefined || effective.includes(required)) && scopeAllowed;
         await client.query(
           'SELECT token_hash FROM public.dashboard_sessions WHERE token_hash = $1 FOR UPDATE /* dashboard-touch-lock */',
           [tokenHash],
@@ -99,6 +131,7 @@ export async function touchDashboardSession(
               username: identity.user.username,
               operator_id: row.operator_id,
               permissions: effective,
+              ...(terminalScope ? { terminalScope } : {}),
               permissionAllowed,
               passkeyRequired: proof?.required === true,
               passkeyVerified: proof?.verified === true,

@@ -1,3 +1,4 @@
+import { withTerminalAuthorization } from './payments/terminal-authorization.js';
 import { readRestriction } from './payments/internal-read.js';
 import { authenticateOperatorKey } from './db/operator-keys.js';
 import { randomUUID } from 'node:crypto';
@@ -87,6 +88,24 @@ export function createApp({ config, logger, pool }: AppDependencies): Express {
     const key = header?.startsWith('Bearer ') ? header.slice(7) : '';
     try {
       const restriction = readRestriction(req, key);
+      if (restriction?.terminalScope) {
+        if (
+          !config.terminalScopedReadsEnabled ||
+          config.nodeEnv === 'production' ||
+          !config.dashboardEnabled ||
+          !config.dashboardBffEnabled ||
+          !config.merchantManagementEnabled
+        )
+          throw new Error('Unavailable');
+        await withTerminalAuthorization(
+          pool,
+          key,
+          restriction.operatorId,
+          restriction.terminalScope,
+          'client.status.read',
+          () => Promise.resolve(true),
+        );
+      }
       if (
         restriction &&
         !(await authenticateOperatorKey(pool, key, { restriction, bounded: true }))
@@ -105,7 +124,17 @@ export function createApp({ config, logger, pool }: AppDependencies): Express {
     });
   });
 
-  app.use('/payments', createPaymentsRouter(pool));
+  app.use(
+    '/payments',
+    createPaymentsRouter(
+      pool,
+      config.terminalScopedReadsEnabled === true &&
+        config.nodeEnv !== 'production' &&
+        config.dashboardEnabled &&
+        config.dashboardBffEnabled &&
+        config.merchantManagementEnabled,
+    ),
+  );
 
   app.use((_req, res) => {
     sendError(res, 404, 'not_found', 'The requested resource was not found.');

@@ -33,7 +33,7 @@ const idempotencySchema = z
 const paymentIdSchema = z.uuid();
 const simulationSchema = z.object({ outcome: z.enum(['succeeded', 'failed']) }).strict();
 
-export function createPaymentsRouter(pool: Pool): Router {
+export function createPaymentsRouter(pool: Pool, terminalReadsEnabled = false): Router {
   const router = Router();
   router.use(async (req, res, next) => {
     const authorization = req.header('authorization');
@@ -43,6 +43,10 @@ export function createPaymentsRouter(pool: Pool): Router {
       restriction = readRestriction(req, apiKey);
     } catch {
       sendError(res, 403, 'forbidden', 'Internal read authorization refused.');
+      return;
+    }
+    if (restriction?.terminalScope && !terminalReadsEnabled) {
+      sendError(res, 403, 'forbidden', 'Terminal reads unavailable.');
       return;
     }
     const operator = apiKey
@@ -60,6 +64,7 @@ export function createPaymentsRouter(pool: Pool): Router {
       return;
     }
     res.locals.operator = operator;
+    res.locals.readAuthorization = restriction ? { apiKey, restriction } : undefined;
     next();
   });
 
@@ -70,7 +75,15 @@ export function createPaymentsRouter(pool: Pool): Router {
       return;
     }
     const operator = res.locals.operator as AuthenticatedOperator;
-    res.json(await listPayments(pool, operator.id, query.data));
+    res.json(
+      await listPayments(
+        pool,
+        operator.id,
+        query.data,
+        res.locals.readAuthorization as
+          { apiKey: string; restriction: import('./internal-read.js').ReadRestriction } | undefined,
+      ),
+    );
   });
 
   router.post('/', async (req, res) => {
@@ -103,7 +116,13 @@ export function createPaymentsRouter(pool: Pool): Router {
       sendError(res, 400, 'invalid_payment_id', 'A valid payment UUID is required.');
       return;
     }
-    const payment = await getPayment(pool, operator.id, id.data);
+    const payment = await getPayment(
+      pool,
+      operator.id,
+      id.data,
+      res.locals.readAuthorization as
+        { apiKey: string; restriction: import('./internal-read.js').ReadRestriction } | undefined,
+    );
     if (!payment) {
       sendError(res, 404, 'not_found', 'The payment was not found.');
       return;

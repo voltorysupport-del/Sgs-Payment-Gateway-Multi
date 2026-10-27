@@ -233,3 +233,14 @@ describe('synthetic Phase 3 enrollment gate', () => {
     ).toBe(true);
   });
 });
+
+it('keeps terminal-scoped submerchant reads off by default and rejects standalone/production activation', () => {
+  expect(loadConfig(VALID_ENV).terminalScopedReadsEnabled).toBe(false);
+  for (const env of [
+    { ...VALID_ENV, TERMINAL_SCOPED_READS_ENABLED: 'true' },
+    { ...VALID_ENV, NODE_ENV: 'production', TERMINAL_SCOPED_READS_ENABLED: 'true' },
+  ])
+    expect(
+      problemsFor(env).some((problem) => problem.includes('TERMINAL_SCOPED_READS_ENABLED')),
+    ).toBe(true);
+});

@@ -1,3 +1,5 @@
+import { withTerminalAuthorization } from '../payments/terminal-authorization.js';
+import type { ReadRestriction } from '../payments/internal-read.js';
 import { withReadClient } from './read-client.js';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
@@ -120,7 +122,27 @@ export async function createPayment(
   }
 }
 
-export async function getPayment(pool: Pool, operatorId: string, paymentId: string) {
+export async function getPayment(
+  pool: Pool,
+  operatorId: string,
+  paymentId: string,
+  authorization?: { apiKey: string; restriction: ReadRestriction },
+) {
+  if (authorization?.restriction.terminalScope)
+    return withTerminalAuthorization(
+      pool,
+      authorization.apiKey,
+      operatorId,
+      authorization.restriction.terminalScope,
+      'client.payments.read',
+      async (client, terminals) => {
+        const result = await client.query<PaymentRow>(
+          `SELECT ${columns} FROM public.payments p WHERE operator_id=$1 AND id=$2 AND provider='simulator' AND terminal_id=ANY($3::uuid[]) AND EXISTS(SELECT 1 FROM public.merchant_terminal_assignments a JOIN public.merchant_terminals t ON t.id=a.terminal_id AND t.operator_id=a.operator_id AND t.status='active' WHERE a.operator_id=p.operator_id AND a.membership_id=$4 AND a.terminal_id=p.terminal_id AND a.revoked_at IS NULL)`,
+          [operatorId, paymentId, terminals, authorization.restriction.terminalScope!.membershipId],
+        );
+        return result.rows[0] ? serialize(result.rows[0]) : undefined;
+      },
+    );
   const result = await withReadClient(pool, (client) =>
     client.query<PaymentRow>(`SELECT ${columns} FROM payments WHERE operator_id = $1 AND id = $2`, [
       operatorId,
@@ -184,7 +206,39 @@ export async function listPayments(
     status?: string;
     currency?: string;
   },
+  authorization?: { apiKey: string; restriction: ReadRestriction },
 ) {
+  if (authorization?.restriction.terminalScope)
+    return withTerminalAuthorization(
+      pool,
+      authorization.apiKey,
+      operatorId,
+      authorization.restriction.terminalScope,
+      'client.payments.read',
+      async (client, terminals) => {
+        const result = await client.query<PaymentRow>(
+          `SELECT ${columns} FROM public.payments p WHERE operator_id=$1 AND provider='simulator' AND terminal_id=ANY($2::uuid[]) AND EXISTS(SELECT 1 FROM public.merchant_terminal_assignments a JOIN public.merchant_terminals t ON t.id=a.terminal_id AND t.operator_id=a.operator_id AND t.status='active' WHERE a.operator_id=p.operator_id AND a.membership_id=$7 AND a.terminal_id=p.terminal_id AND a.revoked_at IS NULL) AND ($3::text IS NULL OR status=$3) AND ($4::text IS NULL OR currency=$4)
+      ORDER BY created_at DESC,id DESC LIMIT $5 OFFSET $6`,
+          [
+            operatorId,
+            terminals,
+            options.status ?? null,
+            options.currency ?? null,
+            options.limit + 1,
+            options.offset,
+            authorization.restriction.terminalScope!.membershipId,
+          ],
+        );
+        return {
+          payments: result.rows.slice(0, options.limit).map(serialize),
+          pagination: {
+            limit: options.limit,
+            offset: options.offset,
+            hasMore: result.rows.length > options.limit,
+          },
+        };
+      },
+    );
   const result = await withReadClient(pool, (client) =>
     client.query<PaymentRow>(
       `SELECT ${columns} FROM payments

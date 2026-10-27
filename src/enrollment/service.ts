@@ -252,8 +252,16 @@ export async function finishEnrollment(
       'UPDATE public.merchant_invitation_tokens SET consumed_at=statement_timestamp() WHERE token_hash=$1',
       [candidate.invitation_token_hash],
     );
-    await client.query('DELETE FROM public.dashboard_sessions WHERE token_hash=$1', [session]);
     await audit(client, intent.operator_id, 'invitation.accepted', intent.id, ceremony.user_id);
+    if (intent.kind === 'submerchant') {
+      for (const terminal of [...intent.terminal_ids].sort()) {
+        await client.query(
+          'INSERT INTO public.merchant_terminal_assignments(id,operator_id,membership_id,terminal_id,invitation_id) VALUES($1,$2,$3,$4,$5)',
+          [randomUUID(), intent.operator_id, member, terminal, intent.id],
+        );
+      }
+    }
+    await client.query('DELETE FROM public.dashboard_sessions WHERE token_hash=$1', [session]);
   });
 }
 interface SessionIdentity {

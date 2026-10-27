@@ -30,6 +30,7 @@ export default defineConfig({
             'tests/integration/merchant-lifecycle.test.ts',
             'tests/integration/merchant-session.test.ts',
             'tests/integration/invitation-acceptance.test.ts',
+            'tests/integration/terminal-authorization.test.ts',
           ],
         },
       },
@@ -44,6 +45,7 @@ export default defineConfig({
             'tests/integration/merchant-lifecycle.test.ts',
             'tests/integration/merchant-session.test.ts',
             'tests/integration/invitation-acceptance.test.ts',
+            'tests/integration/terminal-authorization.test.ts',
           ],
           // Owner-policy invalidation intentionally affects every owner fixture.
           // Explicit intra-test barriers exercise concurrency without unrelated
