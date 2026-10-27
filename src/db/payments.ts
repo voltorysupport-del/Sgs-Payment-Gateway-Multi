@@ -28,6 +28,12 @@ function serialize(row: PaymentRow) {
   };
 }
 
+export class TerminalUnavailable extends Error {
+  constructor() {
+    super('The requested terminal is unavailable.');
+  }
+}
+
 export class PaymentConflict extends Error {
   constructor(
     readonly code: 'idempotency_conflict' | 'invalid_payment_transition',
@@ -44,33 +50,74 @@ export async function createPayment(
   idempotencyKey: string,
   amountMinor: number,
   currency: string,
+  terminalId?: string,
 ) {
-  // The unique constraint resolves concurrent creation; never update an existing
-  // payment on an idempotency collision (including one already completed).
-  const inserted = await pool.query<PaymentRow>(
-    `INSERT INTO payments
-       (id, operator_id, provider, amount_minor, currency, status, idempotency_key)
-     VALUES ($1, $2, 'simulator', $3, $4, 'pending', $5)
-     ON CONFLICT (operator_id, idempotency_key) DO NOTHING
-     RETURNING ${columns}`,
-    [randomUUID(), operatorId, amountMinor, currency, idempotencyKey],
-  );
-  let row = inserted.rows[0];
-  if (!row) {
-    const existing = await pool.query<PaymentRow>(
-      `SELECT ${columns} FROM payments WHERE operator_id = $1 AND idempotency_key = $2`,
+  const client = await pool.connect();
+  let discard = false;
+  try {
+    await client.query('BEGIN');
+    // Serialize same-operator request identities before checking terminal state.
+    // This also permits exact retries after a terminal is suspended.
+    await client.query(
+      "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('vaultx.payment.create:' || $1 || ':' || $2, 0))",
       [operatorId, idempotencyKey],
     );
-    row = existing.rows[0];
+    let row = (
+      await client.query<PaymentRow & { terminal_id: string | null }>(
+        `SELECT ${columns}, terminal_id FROM public.payments WHERE operator_id=$1 AND idempotency_key=$2`,
+        [operatorId, idempotencyKey],
+      )
+    ).rows[0];
+    let created = false;
+    if (!row) {
+      // The INSERT trigger checks eligibility and locks the same-tenant terminal
+      // FOR SHARE through COMMIT, serializing suspension/deletion/reassignment.
+      row = (
+        await client.query<PaymentRow & { terminal_id: string | null }>(
+          `INSERT INTO public.payments
+          (id, operator_id, provider, amount_minor, currency, status, idempotency_key, terminal_id)
+         VALUES ($1,$2,'simulator',$3,$4,'pending',$5,$6)
+         ON CONFLICT (operator_id,idempotency_key) DO NOTHING
+         RETURNING ${columns}, terminal_id`,
+          [randomUUID(), operatorId, amountMinor, currency, idempotencyKey, terminalId ?? null],
+        )
+      ).rows[0];
+      created = Boolean(row);
+      // Keep the unique-constraint fallback for independent/older writers that
+      // do not participate in the application advisory-lock protocol.
+      if (!row)
+        row = (
+          await client.query<PaymentRow & { terminal_id: string | null }>(
+            `SELECT ${columns}, terminal_id FROM public.payments WHERE operator_id=$1 AND idempotency_key=$2`,
+            [operatorId, idempotencyKey],
+          )
+        ).rows[0];
+    }
+    if (!row) throw new Error('Could not resolve the persisted payment.');
+    if (
+      Number(row.amount_minor) !== amountMinor ||
+      row.currency.trim() !== currency ||
+      row.terminal_id !== (terminalId ?? null)
+    ) {
+      throw new PaymentConflict(
+        'idempotency_conflict',
+        'This idempotency key was already used with a different request.',
+      );
+    }
+    await client.query('COMMIT');
+    return { created, payment: serialize(row) };
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      discard = true;
+    }
+    if (error instanceof Error && 'code' in error && error.code === 'VX001')
+      throw new TerminalUnavailable();
+    throw error;
+  } finally {
+    client.release(discard);
   }
-  if (!row) throw new Error('Could not resolve the persisted payment.');
-  if (Number(row.amount_minor) !== amountMinor || row.currency.trim() !== currency) {
-    throw new PaymentConflict(
-      'idempotency_conflict',
-      'This idempotency key was already used with a different request.',
-    );
-  }
-  return { created: inserted.rows.length > 0, payment: serialize(row) };
 }
 
 export async function getPayment(pool: Pool, operatorId: string, paymentId: string) {

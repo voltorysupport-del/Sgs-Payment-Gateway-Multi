@@ -29,7 +29,7 @@ fields are rejected. Payment IDs must be UUIDs.
 
 The creation idempotency key must be 8–128 ASCII letters, digits, underscores, or
 hyphens. Keys are scoped to the authenticated operator. A retry with a changed
-amount or currency returns 409 `idempotency_conflict`; an identical retry returns
+amount, currency or terminal attribution returns 409 `idempotency_conflict`; an identical retry returns
 the original payment's **current state**, including a completed state, without
 resetting it. A new key creates a separate payment.
 
@@ -72,11 +72,12 @@ log it. No Render configuration or deployed database was changed by this work.
 
 ## Database compatibility and verification
 
-**No new migration is needed.** Existing migrations `001_initial_schema.sql` and
-`002_operator_api_keys.sql` already provide payment states, timestamps,
+**Original lifecycle milestone:** migrations `001_initial_schema.sql` and
+`002_operator_api_keys.sql` provide payment states, timestamps,
 operator ownership, API keys, and the unique creation-idempotency constraint.
-The existing server applies pending migrations before listening; a previously
-migrated staging database requires no schema alteration for this feature.
+The existing server applies pending migrations before listening. Terminal
+attribution additionally requires migration 009 and its separately approved
+rollout; see the Phase 4A notes below.
 
 Run all checks against disposable PostgreSQL 17:
 
@@ -89,3 +90,11 @@ See [testing.md](testing.md) for the isolated database safeguards. Never run the
 integration suite against the Render staging database. Tests cover success,
 failure, persistence, retries, concurrent duplicates/conflicts, tenant isolation,
 invalid input, revoked/suspended credentials, and production-mode simulator safety.
+
+## Optional simulator terminal attribution (Phase 4A)
+
+Creation also accepts an optional same-operator active `terminalId`. Migration 009
+preserves historical NULL attribution, makes attribution immutable, and includes
+terminal identity in idempotency checks. Existing response JSON and submerchant
+read denials are unchanged. See [phase4a-terminal-attribution.md](phase4a-terminal-attribution.md)
+for concurrency, privilege, migration and rollback requirements.

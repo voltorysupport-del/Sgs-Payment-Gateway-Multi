@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { createApp } from '../../src/app.js';
 import type { Config } from '../../src/config/index.js';
 import { UnsafeConfigurationError } from '../../src/config/safety.js';
+import { createPayment } from '../../src/db/payments.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { createOperatorWithApiKey, revokeOperatorKey } from '../../src/db/operator-keys.js';
 import { captureLogger, testConfig } from '../helpers.js';
@@ -489,11 +490,6 @@ describe('read-only operator payment history', () => {
       'read_only',
     );
     otherOperatorIds.push(reader.operatorId);
-    // Reassign fixture ownership while retaining the actual helper-issued key.
-    await pool.query('UPDATE payments SET operator_id = $1 WHERE operator_id = $2', [
-      reader.operatorId,
-      operatorId,
-    ]);
     apiKey = reader.apiKey;
     keyId = reader.keyId;
     const previous = operatorId;
@@ -501,16 +497,13 @@ describe('read-only operator payment history', () => {
     otherOperatorIds.push(previous);
   }
   async function createFixture(currency = 'EUR') {
-    return request(app)
-      .post('/payments')
-      .auth(apiKey, { type: 'bearer' })
-      .set('Idempotency-Key', randomUUID())
-      .send({ amountMinor: 100, currency })
-      .expect(201);
+    // Seed the authenticated read-only operator directly; never transfer a
+    // historical payment between tenants to arrange authorization fixtures.
+    return { body: (await createPayment(pool, operatorId, randomUUID(), 100, currency)).payment };
   }
   it('preserves legacy access, lists and retrieves with read-only access, and denies both writes', async () => {
-    const created = await createFixture();
     await readonlyKey();
+    const created = await createFixture();
     const history = await request(app)
       .get('/payments')
       .auth(apiKey, { type: 'bearer' })
@@ -539,11 +532,11 @@ describe('read-only operator payment history', () => {
     expect(persisted.rows).toEqual([{ status: 'pending' }]);
   });
   it('isolates histories and details and validates pagination and filters', async () => {
+    await readonlyKey();
     const created = await createFixture();
     await createFixture('USD');
     const other = await createOperatorWithApiKey(pool, 'Other history', 'other_' + randomUUID());
     otherOperatorIds.push(other.operatorId);
-    await readonlyKey();
     await pool.query(
       "UPDATE payments SET created_at = '2026-01-01T00:00:00Z' WHERE operator_id = $1",
       [operatorId],
