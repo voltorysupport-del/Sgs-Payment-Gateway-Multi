@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { effectiveMerchantPermissions } from '../management/merchant-domain.js';
 export const VIEWER_PERMISSIONS = ['client.payments.read', 'client.status.read'] as const;
 export type ViewerPermission = (typeof VIEWER_PERMISSIONS)[number];
 
@@ -52,6 +53,21 @@ export async function effectiveViewerPermissions(
   membershipId: string,
   operatorId: string,
 ): Promise<ViewerPermission[]> {
+  const profile = await client.query<{ kind: string }>(
+    'SELECT kind FROM public.merchant_member_profiles WHERE membership_id=$1 AND operator_id=$2',
+    [membershipId, operatorId],
+  );
+  if (profile.rows[0]) {
+    const permissions = await effectiveMerchantPermissions(client, membershipId, operatorId);
+    // The current signed BFF contract scopes an entire operator, not terminals.
+    // Never give terminal-restricted subjects this broader payment read path.
+    // A future reviewed terminal-aware handoff is required before enabling it.
+    return VIEWER_PERMISSIONS.filter(
+      (permission) =>
+        permissions.includes(permission) &&
+        !(profile.rows[0]!.kind === 'submerchant' && permission === 'client.payments.read'),
+    );
+  }
   const result = await client.query<{ permission_code: string }>(
     `SELECT g.permission_code FROM public.membership_permission_grants g
  JOIN public.operator_permission_entitlements e ON e.operator_id=g.operator_id AND e.permission_code=g.permission_code AND e.enabled

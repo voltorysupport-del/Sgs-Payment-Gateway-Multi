@@ -1065,7 +1065,7 @@ it('uses real restricted runtime privileges: policy reads succeed, catalog/grant
     await client.query('BEGIN');
     await client.query('GRANT USAGE ON SCHEMA public TO vaultx_viewer_runtime');
     await client.query(
-      'GRANT SELECT ON public.dashboard_users,public.dashboard_memberships,public.operators,public.operator_access_policies,public.operator_permission_entitlements,public.membership_permission_grants,public.access_permissions TO vaultx_viewer_runtime',
+      'GRANT SELECT ON public.dashboard_users,public.dashboard_memberships,public.operators,public.operator_access_policies,public.operator_permission_entitlements,public.membership_permission_grants,public.access_permissions,public.merchant_member_profiles TO vaultx_viewer_runtime',
     );
     await client.query(
       'GRANT UPDATE(id) ON public.dashboard_users,public.dashboard_memberships,public.operators,public.membership_permission_grants TO vaultx_viewer_runtime',
