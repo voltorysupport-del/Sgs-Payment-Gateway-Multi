@@ -173,3 +173,69 @@ claimed as proof of cryptographic verification.
 - Verify production PostgreSQL TLS, least-privilege runtime versus migration
   credentials, audit retention, proxy configuration and session/limiter capacity.
 - Terminal-scoped payment data and external providers remain out of scope.
+
+## Final PR #29 security review
+
+Reviewed the complete published diff at
+`c52e69222fa3a61bc96fc02417164c1fc833db7c`, including the existing auth,
+management, BFF, machine payment routes, migration guards and library verifier.
+The original Linux and native Windows workflow runs both completed successfully.
+The focused correction does not enable gates or change payment behavior.
+
+Confirmed findings and corrections:
+
+| Severity | Affected code                                                                                | Reproduction and smallest correction                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Medium   | `src/enrollment/service.ts` acceptance; `migrations/008_invitation_webauthn.sql` token guard | A valid token could expire between admission and the final consumption UPDATE. A test-only PostgreSQL trigger waits until the actual token deadline after admission and before user INSERT; original code incorrectly commits activation. The consumption row trigger now rechecks token **and intent** expiry with `clock_timestamp()` after UPDATE lock waits. Failure rolls back the entire user/member/grant/passkey/ceremony/audit transaction. Direct SQL expired-token consumption is also rejected. Expiry linearizes at the guarded consumption transition, not at the later COMMIT acknowledgement. |
+| Low      | `src/enrollment/routes.ts` dispatch                                                          | Express matches mixed-case and trailing-slash routes, but exact string dispatch selected the wrong ceremony or refused a valid one. Original `/passkeys/ENROLLMENT/options/` returned 400. Normalize matched paths once; the regression exercises all four matched alias endpoints with real signed responses, session rotation and no secret logging. No authorization bypass was observed from the old mismatch.                                                                                                                                                                                            |
+| Low      | `src/enrollment/policy.ts`, `src/enrollment/service.ts` capacity reservation                 | Admission allowed a tenant with exactly 1,000 members to add member 1,001, leaving future merchant operations outside their existing supported size. Return the already locked member count and reject acceptance at capacity under the exclusive tenant gate. The regression fills a synthetic tenant to 1,000, proves no extra account/token consumption and verifies existing management still works.                                                                                                                                                                                                      |
+
+Validation also exposed an existing expired-challenge fixture precision defect:
+two independent `clock_timestamp()` evaluations could exceed the five-minute
+schema bound by microseconds. The fixture now uses one `statement_timestamp()`;
+the schema constraint and expired-challenge rejection are unchanged.
+
+No critical/high defect or additional authorization bypass was identified in the
+reviewed paths. Specific checks:
+
+- Tokens remain random/hash-only, one-shot and unrewriteable; live issuer/sponsor
+  authority, policy versions, exact sponsor grants, active tenant, ceilings and
+  terminal restrictions are rechecked under the gates. No restore/regrant path
+  revives old tokens or grants. Admin terminal-restricted intent remains refused;
+  submerchant payment reads remain denied.
+- WebAuthn verifies the exact challenge (ultimately matched to the session-bound
+  DB hash), origin, RP hostname, owned credential, optional user handle, UV and
+  signature. Counter updates use CAS; non-increasing nonzero counters fail.
+  All-zero counters remain supported by the verifier for authenticators that do
+  not implement counters; single-use challenges/session rotation still prevent
+  replay. Attestation `none` supplies no physical-device provenance guarantee.
+- Password-only/legacy merchant sessions are denied at every merchant read/write
+  route and BFF list/detail/status. Client cookies cannot authenticate the machine
+  payment API or owner realm. Subject-only identity/CSRF/logout and legacy viewer
+  read compatibility remain intentional. Tests use valid transport/Origin/CSRF so
+  denials reach the actual authorization boundary.
+- Authentication rotates cookie/CSRF without extending the original absolute
+  expiry. Merchant writes require five-minute assurance. Factor changes advance
+  user auth versions and invalidate sessions/challenges; status/grant changes use
+  the existing invalidation triggers. New regressions cover stale write assurance,
+  counter rejection and renewed assertion without session resurrection.
+- Owner gate/rows precede the tenant gate. Ordered identities/grants precede
+  sessions; session precedes ceremony and passkey updates. Cleanup/CSRF/logout do
+  not acquire identity/policy locks after session locks. No new lock-order cycle
+  was identified for supported application paths. SQL/lock/admission/total limits
+  bound availability failures. Arbitrary privileged SQL outside the documented
+  protocol is not a supported mutation path.
+- Migration 008 remains unmerged, additive and transactional; populated-007 and
+  rollback tests are preserved. No earlier migration is rewritten. History/audit
+  guards remain invoker-rights with pinned paths and qualified table references.
+  Restricted viewer roles cannot mutate the new enrollment tables.
+
+Remaining **enablement** blockers are unchanged: there is no production token
+issuer/delivery or enrollment UI, recovery/reset is unavailable, actual physical
+passkey-device testing is outstanding, and production runtime database TLS,
+least-privilege role grants/function access and external audit retention have not
+been validated. Current startup still runs migrations using the configured pool;
+this is not a production migration/runtime role split. All feature gates must
+remain off. A lost COMMIT acknowledgement is ambiguous: do not automatically
+retry, replace tokens, reset factors or bypass history. None of those limitations
+is permission to activate this default-off increment after a development merge.

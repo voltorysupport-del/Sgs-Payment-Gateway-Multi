@@ -24,6 +24,14 @@ BEGIN
  OR NOT ((NEW.consumed_at IS NOT NULL AND NEW.consumed_at=statement_timestamp() AND NEW.revoked_at IS NULL)
       OR (NEW.revoked_at IS NOT NULL AND NEW.revoked_at=statement_timestamp() AND NEW.consumed_at IS NULL)))
  THEN RAISE EXCEPTION 'Invitation transition refused' USING ERRCODE='42501'; END IF;
+ -- Admission is not consumption: a browser/session/SQL wait may cross expiry.
+ -- Use the wall clock in the row trigger, after any UPDATE lock wait, and fail
+ -- the entire activation transaction rather than committing an expired token.
+ IF TG_OP='UPDATE' AND NEW.consumed_at IS NOT NULL AND
+  (NEW.expires_at<=pg_catalog.clock_timestamp() OR NOT EXISTS(
+   SELECT 1 FROM public.merchant_invitations i WHERE i.id=NEW.invitation_id
+    AND i.revoked_at IS NULL AND i.expires_at>pg_catalog.clock_timestamp()))
+ THEN RAISE EXCEPTION 'Invitation consumption refused' USING ERRCODE='42501'; END IF;
  RETURN NEW;
 END; $$;
 CREATE TRIGGER invitation_token_guard BEFORE INSERT OR UPDATE ON public.merchant_invitation_tokens FOR EACH ROW EXECUTE FUNCTION public.guard_invitation_token();

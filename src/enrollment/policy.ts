@@ -138,5 +138,11 @@ export async function lockIntent(client: PoolClient, id: string) {
     ).rows.map((g) => g.id);
     if (grantIds.length !== needed.length) throw unavailable();
   }
-  return { intent, policyVersion: policy.authorization_version, issuerVersion, grantIds };
+  return {
+    intent,
+    policyVersion: policy.authorization_version,
+    issuerVersion,
+    grantIds,
+    memberCount: Number(count.count),
+  };
 }

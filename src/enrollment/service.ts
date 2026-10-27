@@ -189,7 +189,10 @@ export async function finishEnrollment(
       )
     ).rows[0];
     if (!candidate?.invitation_token_hash) throw unavailable();
-    const { intent } = await liveToken(client, candidate.invitation_token_hash);
+    const { intent, memberCount } = await liveToken(client, candidate.invitation_token_hash);
+    // Preserve the existing 1,000-member management bound. The exclusive tenant
+    // gate makes this reservation atomic with all other acceptance transactions.
+    if (memberCount >= 1000) throw unavailable();
     await preauth(client, session);
     const ceremony = (
       await client.query<{ user_id: string; password_hash: string }>(

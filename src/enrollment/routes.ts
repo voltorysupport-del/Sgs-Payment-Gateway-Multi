@@ -82,9 +82,12 @@ export function createPasskeyRouter(
       active++;
       try {
         const origin = config.dashboardPublicOrigin!;
-        const registering = req.path.startsWith('/enrollment/');
+        // Express matches case-insensitively and permits a trailing slash.
+        // Dispatch exactly the same route it matched, never a fallback ceremony.
+        const path = req.path.toLowerCase().replace(/\/+$/, '');
+        const registering = path.startsWith('/enrollment/');
         if (registering === session.authenticated) throw new Error('Request refused.');
-        if (req.path === '/enrollment/options') {
+        if (path === '/enrollment/options') {
           const input = enrollment.parse(req.body);
           res.json(
             await beginEnrollment(
@@ -95,7 +98,7 @@ export function createPasskeyRouter(
               origin,
             ),
           );
-        } else if (req.path === '/enrollment/verify') {
+        } else if (path === '/enrollment/verify') {
           const input = response.parse(req.body);
           await finishEnrollment(
             pool,
@@ -110,7 +113,7 @@ export function createPasskeyRouter(
             path: '/',
           });
           res.json({ enrolled: true, privilegedAccess: false });
-        } else if (req.path === '/authentication/options') {
+        } else if (path === '/authentication/options') {
           z.object({}).strict().parse(req.body);
           res.json(await beginAuthentication(pool, session.hash, origin));
         } else {
