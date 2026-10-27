@@ -301,6 +301,15 @@ export function createDashboardAuthRouter(pool: Pool, config: Config): Router {
       user: { id: s.user_id, username: s.username },
       operator: { id: s.operator_id },
       role: 'viewer',
+      authentication: {
+        passkeyRequired: s.passkeyRequired,
+        passkeyVerified: s.passkeyVerified,
+        passkeyFresh: s.passkeyFresh,
+        passkeysEnabled:
+          config.phase3EnrollmentEnabled === true &&
+          config.merchantManagementEnabled &&
+          config.nodeEnv !== 'production',
+      },
     });
   });
   router.post('/logout', async (req, res) => {

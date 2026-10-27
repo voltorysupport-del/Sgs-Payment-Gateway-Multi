@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { DashboardAuth } from '../auth';
+import { api } from '../api';
+import { passkeys } from '../passkeys';
+import { PasskeyGate, InvitationAcceptance } from '../passkey-ui';
 import { merchantApi, MerchantApiError, type MerchantIdentity, type MerchantMember } from './api';
 import '../styles.css';
 import './styles.css';
-const auth = new DashboardAuth();
+const auth = new DashboardAuth(api, passkeys, true);
 const unconfirmedKey = 'vaultx-merchant-write-unconfirmed';
 function unconfirmed() {
   try {
@@ -217,9 +220,10 @@ export function MerchantWorkspace({
           </button>
         </header>
         <p className="merchant-warning">
-          Invitation activation and credential delivery are not enabled. Terminal assignments and
-          terminal-scoped payment reads require a separate reviewed milestone. No real payment
-          operation is available.
+          Production enrollment, real invitation delivery and recovery remain disabled. Synthetic
+          invitations use the separately gated test flow. Terminal assignments and terminal-scoped
+          payment reads require a separate reviewed milestone. No real payment operation is
+          available.
         </p>
         {error && <p role="alert">{error}</p>}
         {notice && <p role="status">{notice}</p>}
@@ -410,6 +414,10 @@ export function MerchantApp({ controller = auth }: { controller?: DashboardAuth 
   const [merchant, setMerchant] = useState<MerchantIdentity>();
   const [error, setError] = useState('');
   const [writePending, setWritePending] = useState(false);
+  const [enrolling, setEnrolling] = useState(false);
+  useEffect(() => {
+    if (state.phase !== 'anonymous') setEnrolling(false);
+  }, [state.phase]);
   useEffect(() => controller.start(), [controller]);
   useEffect(() => {
     setMerchant(undefined);
@@ -431,6 +439,10 @@ export function MerchantApp({ controller = auth }: { controller?: DashboardAuth 
       });
     return () => controller.abort();
   }, [state]);
+  if (['passkey-required', 'passkey', 'enrollment'].includes(state.phase))
+    return <PasskeyGate controller={controller} state={state} />;
+  if (state.phase === 'anonymous' && enrolling)
+    return <InvitationAcceptance controller={controller} onClose={() => setEnrolling(false)} />;
   if (
     state.phase !== 'authenticated' ||
     !merchant ||
@@ -441,7 +453,8 @@ export function MerchantApp({ controller = auth }: { controller?: DashboardAuth 
       <main className="merchant-closed">
         <h1>VaultX Pay · Merchant management</h1>
         <p role="status">
-          {error ||
+          {state.message ||
+            error ||
             (state.phase === 'checking'
               ? 'Checking your existing client session…'
               : 'An active, explicitly authorized merchant-administrator session is required.')}
@@ -449,6 +462,8 @@ export function MerchantApp({ controller = auth }: { controller?: DashboardAuth 
         {state.phase === 'anonymous' && (
           <form
             aria-label="Merchant sign-in"
+            method="post"
+            action="/dashboard-api/auth/login"
             onSubmit={(event) => {
               event.preventDefault();
               const form = event.currentTarget,
@@ -482,13 +497,19 @@ export function MerchantApp({ controller = auth }: { controller?: DashboardAuth 
             <button>Sign in securely</button>
           </form>
         )}
+        {state.phase === 'anonymous' && (
+          <button onClick={() => setEnrolling(true)}>Accept a test invitation</button>
+        )}
+        {state.phase === 'authenticated' && (
+          <button onClick={() => void controller.logout()}>Sign out</button>
+        )}
         {state.error && <p role="alert">{state.error}</p>}
         <button onClick={() => void controller.check(true)}>Check session</button>
       </main>
     );
   return (
     <>
-      <div className="merchant-session">
+      <header className="merchant-session">
         <span>{merchant.user.username}</span>
         <button
           disabled={writePending}
@@ -500,7 +521,7 @@ export function MerchantApp({ controller = auth }: { controller?: DashboardAuth 
         >
           Sign out
         </button>
-      </div>
+      </header>
       <MerchantWorkspace
         key={merchant.user.id + ':' + merchant.operator.id + ':' + merchant.membership.version}
         identity={merchant}

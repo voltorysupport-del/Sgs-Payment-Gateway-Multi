@@ -1,9 +1,21 @@
 import { api, ApiError, type Identity } from './api';
+import { passkeys, PasskeyError } from './passkeys';
 
 export type AuthState = {
-  phase: 'checking' | 'anonymous' | 'authenticated' | 'login' | 'logout' | 'blocked';
+  phase:
+    | 'checking'
+    | 'anonymous'
+    | 'authenticated'
+    | 'login'
+    | 'logout'
+    | 'blocked'
+    | 'passkey-required'
+    | 'passkey'
+    | 'enrollment';
   identity?: Identity;
   error?: string;
+  message?: string;
+  needsRestart?: boolean;
 };
 const lockName = 'vaultx-dashboard-auth';
 const topic = 'vaultx-dashboard-session';
@@ -20,7 +32,25 @@ export class DashboardAuth {
   private stopped = false;
   private read?: AbortController;
   private channel?: BroadcastChannel;
-  constructor(private readonly client = api) {}
+  private ceremony?: AbortController;
+  private ceremonyUsed = false;
+  private enrollmentUnconfirmed = false;
+  constructor(
+    private readonly client = api,
+    private readonly ceremonies = passkeys,
+    private readonly requireFreshPasskey = false,
+  ) {}
+  private identityState(identity: Identity): AuthState {
+    const a = identity.authentication;
+    return a.passkeyRequired &&
+      (!a.passkeyVerified || (this.requireFreshPasskey && !a.passkeyFresh))
+      ? { phase: 'passkey-required', identity, needsRestart: this.ceremonyUsed }
+      : { phase: 'authenticated', identity };
+  }
+  cancelPrompt = () => this.ceremony?.abort();
+  verifyPasskey = () => this.mutate('passkey');
+  enroll = (invitationToken: string, password: string) =>
+    this.mutate('enrollment', undefined, password, invitationToken);
   snapshot = (): AuthState => this.state;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -72,6 +102,8 @@ export class DashboardAuth {
           this.block('Session change could not be confirmed. Check the session before continuing.');
           return;
         }
+        // A cross-tab notice is only a request to reconcile. It is not proof
+        // of a fresh password session and cannot reset a cancelled ceremony.
         void this.check();
       };
     }
@@ -80,6 +112,7 @@ export class DashboardAuth {
     void this.check();
     return () => {
       this.stopped = true;
+      this.ceremony?.abort();
       this.invalidate();
       this.channel?.close();
       document.removeEventListener('visibilitychange', this.visibility);
@@ -109,7 +142,7 @@ export class DashboardAuth {
         const identity = await this.client.me(controller.signal);
         if (epoch === this.epoch && !this.pending && this.visible()) {
           this.blocked = false;
-          this.set({ phase: 'authenticated', identity });
+          this.set(this.identityState(identity));
         }
       };
       // Browsers without Web Locks can still read an existing session, but cannot
@@ -119,6 +152,12 @@ export class DashboardAuth {
     } catch (error) {
       if (epoch !== this.epoch || this.pending || controller.signal.aborted) return;
       if (error instanceof ApiError && error.status === 401) {
+        if (this.enrollmentUnconfirmed) {
+          this.block(
+            'Enrollment could not be confirmed. Do not repeat the invitation. Contact your administrator.',
+          );
+          return;
+        }
         this.blocked = false;
         this.set({ phase: 'anonymous' });
       } else this.block('The session could not be verified. Check the session before continuing.');
@@ -137,10 +176,25 @@ export class DashboardAuth {
   };
   login = (username: string, password: string) => this.mutate('login', username, password);
   logout = () => this.mutate('logout');
-  private async mutate(kind: 'login' | 'logout', username?: string, password?: string) {
+  private async mutate(
+    kind: 'login' | 'logout' | 'passkey' | 'enrollment',
+    username?: string,
+    password?: string,
+    invitationToken?: string,
+  ) {
     if (this.pending || this.blocked || this.stopped) return;
     if (kind === 'login' && this.state.phase !== 'anonymous') return;
-    if (kind === 'logout' && this.state.phase !== 'authenticated') return;
+    if (kind === 'logout' && !['authenticated', 'passkey-required'].includes(this.state.phase))
+      return;
+    if (kind === 'enrollment' && this.state.phase !== 'anonymous') return;
+    if (
+      kind === 'passkey' &&
+      (this.state.phase !== 'passkey-required' ||
+        this.ceremonyUsed ||
+        !this.state.identity?.authentication.passkeysEnabled)
+    )
+      return;
+    const prior = this.state.identity;
     this.pending = true;
     this.invalidate();
     const epoch = this.epoch;
@@ -159,11 +213,54 @@ export class DashboardAuth {
           }
           if (!existing) await this.client.login(username!, password!);
           const identity = existing ?? (await this.client.me());
+          // Reset only after this tab actually completed password login AND
+          // confirmed its server identity. Joining an existing cookie is not login.
+          if (!existing) this.ceremonyUsed = false;
           this.notice('auth-changed');
           if (epoch === this.epoch && !this.stopped)
-            this.set(this.visible() ? { phase: 'authenticated', identity } : { phase: 'checking' });
+            this.set(this.visible() ? this.identityState(identity) : { phase: 'checking' });
+        } else if (kind === 'passkey') {
+          // Re-read the shared cookie before invoking a browser prompt: a waiting
+          // tab must never attach a credential to another subject's session.
+          const current = await this.client.me();
+          if (current.user.id !== prior?.user.id || current.operator.id !== prior.operator.id)
+            throw new ApiError(401);
+          this.ceremony = new AbortController();
+          this.ceremonyUsed = true;
+          await this.ceremonies.authenticate(this.ceremony.signal);
+          const identity = await this.client.me();
+          if (
+            identity.user.id !== current.user.id ||
+            identity.operator.id !== current.operator.id ||
+            !identity.authentication.passkeyVerified
+          )
+            throw new ApiError(503);
+          this.ceremonyUsed = false;
+          this.notice('auth-changed');
+          this.set(this.visible() ? this.identityState(identity) : { phase: 'checking' });
+        } else if (kind === 'enrollment') {
+          let existing: Identity | undefined;
+          try {
+            existing = await this.client.me();
+          } catch (error) {
+            if (!(error instanceof ApiError && error.status === 401)) throw error;
+          }
+          if (existing) {
+            this.set(this.identityState(existing));
+            this.notice('auth-changed');
+            return;
+          }
+          this.ceremony = new AbortController();
+          await this.ceremonies.enroll(invitationToken!, password!, this.ceremony.signal);
+          this.notice('auth-changed');
+          this.set({
+            phase: 'anonymous',
+            message:
+              'Passkey enrollment completed. Sign in with your invited username and password, then verify your passkey.',
+          });
         } else {
           await this.client.logout();
+          this.ceremonyUsed = false;
           // Terminal logout invalidates EVERY prior read, even without a channel.
           if (epoch === this.epoch && !this.stopped) {
             this.invalidate();
@@ -173,7 +270,31 @@ export class DashboardAuth {
         }
       });
     } catch (error) {
-      if (kind === 'login' && error instanceof ApiError && [401, 429].includes(error.status)) {
+      if (
+        (kind === 'passkey' || kind === 'enrollment') &&
+        error instanceof PasskeyError &&
+        error.kind !== 'unconfirmed'
+      ) {
+        if (kind === 'passkey')
+          this.set({
+            phase: 'passkey-required',
+            identity: prior,
+            error: error.message,
+            needsRestart: this.ceremonyUsed,
+          });
+        else this.set({ phase: 'anonymous', error: error.message });
+        this.notice('auth-changed');
+      } else if (kind === 'enrollment') {
+        this.enrollmentUnconfirmed = true;
+        this.block(
+          'Enrollment could not be confirmed. Do not repeat the invitation. Contact your administrator.',
+        );
+        this.notice('auth-unconfirmed');
+      } else if (
+        kind === 'login' &&
+        error instanceof ApiError &&
+        [401, 429].includes(error.status)
+      ) {
         this.set({
           phase: 'anonymous',
           error: error.status === 401 ? 'Invalid username or password.' : error.message,
@@ -188,6 +309,9 @@ export class DashboardAuth {
         this.notice('auth-unconfirmed');
       }
     } finally {
+      password = undefined;
+      invitationToken = undefined;
+      this.ceremony = undefined;
       this.pending = false;
       // React may detach/restart the owner while a cookie response is in flight.
       // Reconcile only after settlement; an unconfirmed outcome remains blocked.

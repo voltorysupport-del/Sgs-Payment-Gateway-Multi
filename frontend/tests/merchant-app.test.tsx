@@ -51,7 +51,9 @@ it('navigates actual merchant contracts and labels unavailable lifecycle boundar
   vi.spyOn(merchantApi, 'audit').mockResolvedValue({ events: [], pagination: page });
   render(<MerchantWorkspace identity={identity} expired={vi.fn()} />);
   expect(
-    screen.getByText(/Invitation activation and credential delivery are not enabled/),
+    screen.getByText(
+      /Production enrollment, real invitation delivery and recovery remain disabled/,
+    ),
   ).toBeTruthy();
   await userEvent.click(screen.getByRole('button', { name: 'Team and permissions' }));
   expect(await screen.findByText('synthetic_child')).toBeTruthy();
@@ -163,7 +165,17 @@ it('provides direct secure client login without requiring the payment BFF and se
     .fn()
     .mockRejectedValueOnce(new ApiError(401))
     .mockRejectedValueOnce(new ApiError(401))
-    .mockResolvedValue({ user: identity.user, operator: identity.operator, role: 'viewer' });
+    .mockResolvedValue({
+      user: identity.user,
+      operator: identity.operator,
+      role: 'viewer',
+      authentication: {
+        passkeyRequired: false,
+        passkeyVerified: false,
+        passkeyFresh: false,
+        passkeysEnabled: false,
+      },
+    });
   const controller = new DashboardAuth({ ...api, me, login });
   vi.spyOn(merchantApi, 'me').mockResolvedValue(identity);
   render(<MerchantApp controller={controller} />);

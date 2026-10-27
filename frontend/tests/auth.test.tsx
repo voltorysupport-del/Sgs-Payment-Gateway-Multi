@@ -6,6 +6,12 @@ const identity: Identity = {
   user: { id: '11111111-1111-4111-8111-111111111111', username: 'synthetic-viewer' },
   operator: { id: '22222222-2222-4222-8222-222222222222' },
   role: 'viewer',
+  authentication: {
+    passkeyRequired: false,
+    passkeyVerified: false,
+    passkeyFresh: false,
+    passkeysEnabled: false,
+  },
 };
 function deferred<T>() {
   let resolve!: (value: T) => void;

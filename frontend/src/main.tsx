@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { api, ApiError, type Payment } from './api';
 import './styles.css';
 import { DashboardAuth } from './auth';
+import { PasskeyGate, InvitationAcceptance } from './passkey-ui';
 
 type View = 'overview' | 'payments' | 'status' | `payments/${string}`;
 const route = (): View => {
@@ -110,7 +111,11 @@ function Table({ payments }: { payments: Payment[] }) {
 function Login({
   onLogin,
   error,
+  onEnroll,
+  message,
 }: {
+  onEnroll: () => void;
+  message?: string;
   onLogin: (username: string, password: string) => Promise<void>;
   error?: string;
 }) {
@@ -146,7 +151,10 @@ function Login({
           <span className="mode">● SIMULATOR MODE</span>
           <h1 tabIndex={-1}>Welcome back</h1>
           <p className="muted">Sign in to your operator workspace.</p>
+          {message && <p role="status">{message}</p>}
           <form
+            method="post"
+            action="/dashboard-api/auth/login"
             onSubmit={(event) => {
               event.preventDefault();
               const form = event.currentTarget;
@@ -181,6 +189,9 @@ function Login({
             {error && <Alert>{error}</Alert>}
             <button className="primary">Sign in securely →</button>
           </form>
+          <button className="invitation-open" onClick={onEnroll}>
+            Accept a test invitation
+          </button>
           <p className="login-note">
             Access is limited to your assigned operator.
             <br />
@@ -470,6 +481,10 @@ export function App() {
   const [auth] = useState(() => new DashboardAuth());
   const state = useSyncExternalStore(auth.subscribe, auth.snapshot);
   const [view, setView] = useState<View>(route);
+  const [enrolling, setEnrolling] = useState(false);
+  useEffect(() => {
+    if (state.phase !== 'anonymous') setEnrolling(false);
+  }, [state.phase]);
   const version = auth.version();
   useEffect(() => auth.start(), [auth]);
   useEffect(() => {
@@ -487,6 +502,10 @@ export function App() {
     }
   }, [state.phase, state.identity?.user.id, view, version]);
   const expire = useCallback(() => auth.expire(version), [auth, version]);
+  if (['passkey-required', 'passkey', 'enrollment'].includes(state.phase))
+    return <PasskeyGate controller={auth} state={state} />;
+  if (state.phase === 'anonymous' && enrolling)
+    return <InvitationAcceptance controller={auth} onClose={() => setEnrolling(false)} />;
   if (['checking', 'login', 'logout'].includes(state.phase))
     return (
       <main className="boot">
@@ -512,7 +531,14 @@ export function App() {
       </main>
     );
   if (state.phase !== 'authenticated' || !state.identity)
-    return <Login onLogin={auth.login} error={state.error} />;
+    return (
+      <Login
+        onLogin={auth.login}
+        error={state.error}
+        message={state.message}
+        onEnroll={() => setEnrolling(true)}
+      />
+    );
   const identity = state.identity;
   return (
     <div className="app-shell" key={`${version}:${identity.user.id}:${identity.operator.id}`}>
