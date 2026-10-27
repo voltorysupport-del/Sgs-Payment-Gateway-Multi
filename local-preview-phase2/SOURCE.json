@@ -1,0 +1,16 @@
+{
+  "applicationRepository": "voltorysupport-del/Sgs-Payment-Gateway-Multi",
+  "applicationSourceBranch": "feature/step-1-project-setup",
+  "applicationSourceCommit": "6348b6716fa3153d01902b8eaf8e891b9c8c9aad",
+  "mode": "isolated-synthetic-three-level-interaction-prototype",
+  "productionCodeImported": false,
+  "runtimeDependencies": "Node.js 24 built-in modules only",
+  "host": "127.0.0.1",
+  "port": 4175,
+  "realAuthenticationImplemented": false,
+  "realMfaImplemented": false,
+  "databaseAccess": false,
+  "gatewayAccess": false,
+  "environmentCredentialsRead": false,
+  "livePaymentsEnabled": false
+}
