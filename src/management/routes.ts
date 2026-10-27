@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import type { Config } from '../config/index.js';
 import { sendError } from '../shared/http-errors.js';
+import { MERCHANT_PERMISSIONS } from './merchant-domain.js';
 import { executeManagement, type ManagementCommand } from './domain.js';
 
 export const OWNER_SESSION_COOKIE = '__Host-vaultx_owner_session';
@@ -147,6 +148,58 @@ export function createManagementRouter(pool: Pool, config: Config): Router {
       });
       res.status(204).end();
     }
+  });
+  router.post('/clients', async (req, res) => {
+    const body = z
+      .object({
+        code: z.string().regex(/^[a-z][a-z0-9_-]{2,63}$/),
+        name: z
+          .string()
+          .trim()
+          .min(1)
+          .max(120)
+          .refine(
+            (v) =>
+              !Array.from(v).some(
+                (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+              ),
+          ),
+      })
+      .strict()
+      .safeParse(req.body);
+    if (!body.success || !empty.safeParse(req.query).success) return invalid(res);
+    const result = await run(req, res, {
+      action: 'operators.create',
+      ...body.data,
+      csrfHash: csrfHash(req)!,
+    });
+    if (result) res.status(201).json(result.value);
+  });
+  router.post('/clients/:id/administrator-invitations', async (req, res) => {
+    const id = uuid.safeParse(req.params.id);
+    const body = z
+      .object({
+        username: z.string().regex(/^[a-z0-9][a-z0-9_.-]{2,79}$/),
+        permissions: z
+          .array(z.enum(MERCHANT_PERMISSIONS))
+          .min(1)
+          .max(MERCHANT_PERMISSIONS.length)
+          .refine((v) => new Set(v).size === v.length),
+        terminalIds: z
+          .array(uuid)
+          .max(50)
+          .refine((v) => new Set(v).size === v.length),
+      })
+      .strict()
+      .safeParse(req.body);
+    if (!id.success || !body.success || !empty.safeParse(req.query).success) return invalid(res);
+    const result = await run(req, res, {
+      action: 'invitations.create_admin',
+      targetId: id.data,
+      ...body.data,
+      csrfHash: csrfHash(req)!,
+    });
+    if (result) res.status(201).json(result.value);
   });
   router.all('/clients', method('GET'), async (req, res) => {
     const parsed = pageSchema.safeParse(req.query);

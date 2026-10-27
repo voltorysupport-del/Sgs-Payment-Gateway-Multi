@@ -31,6 +31,7 @@ const booleanFlag = (name: string) =>
 
 const envSchema = z
   .object({
+    MERCHANT_MANAGEMENT_ENABLED: booleanFlag('MERCHANT_MANAGEMENT_ENABLED'),
     OWNER_ENABLED: booleanFlag('OWNER_ENABLED'),
     OWNER_ORIGIN: z
       .string()
@@ -141,6 +142,15 @@ const envSchema = z
     SIMULATOR_CONTROLS_ENABLED: booleanFlag('SIMULATOR_CONTROLS_ENABLED'),
   })
   .superRefine((env, ctx) => {
+    if (env.MERCHANT_MANAGEMENT_ENABLED) {
+      if (env.NODE_ENV === 'production' || !env.DASHBOARD_ENABLED)
+        ctx.addIssue({
+          code: 'custom',
+          path: ['MERCHANT_MANAGEMENT_ENABLED'],
+          message:
+            'Merchant management requires development/test dashboard authentication; production activation remains blocked',
+        });
+    }
     if (env.OWNER_ENABLED) {
       if (env.NODE_ENV === 'production')
         ctx.addIssue({
@@ -212,6 +222,7 @@ const envSchema = z
   });
 
 export interface Config {
+  readonly merchantManagementEnabled: boolean;
   readonly ownerEnabled: boolean;
   readonly ownerOrigin: string | undefined;
   readonly dashboardBffEnabled: boolean;
@@ -262,6 +273,7 @@ export function loadConfig(env: EnvSource = process.env): Config {
   const parsed = result.data;
 
   return Object.freeze({
+    merchantManagementEnabled: parsed.MERCHANT_MANAGEMENT_ENABLED,
     ownerEnabled: parsed.OWNER_ENABLED,
     ownerOrigin: parsed.OWNER_ORIGIN,
     dashboardEnabled: parsed.DASHBOARD_ENABLED,

@@ -95,7 +95,12 @@ it('keeps owner realm separate and gives no authority to a viewer/session or mac
     ok: true,
     value: {
       owner: { id: actor.id },
-      permissions: ['platform.clients.read', 'platform.clients.manage', 'platform.audit.read'],
+      permissions: [
+        'platform.clients.read',
+        'platform.clients.manage',
+        'platform.clients.bootstrap_admin',
+        'platform.audit.read',
+      ],
     },
   });
   await expect(

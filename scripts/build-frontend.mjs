@@ -7,3 +7,5 @@ process.env.NODE_ENV = 'production';
 await build({ configFile: 'frontend/vite.config.ts' });
 
 await build({ configFile: 'frontend/owner.vite.config.ts' });
+
+await build({ configFile: 'frontend/merchant.vite.config.ts' });

@@ -116,7 +116,7 @@ it.skipIf(process.env.VAULTX_BROWSER_TESTS !== 'true')(
       expect((await context.request.get(origin + '/dashboard-api/auth/me')).status()).toBe(401);
       await page.getByRole('link', { name: 'Operators', exact: true }).click();
       await page.getByRole('button', { name: 'Inspect ' + code, exact: true }).click();
-      const name = page.getByLabel('Display name');
+      const name = page.getByLabel('Display name', { exact: true });
       await browserExpect(name).toHaveValue('Synthetic owner browser client');
       await name.fill('Updated owner browser client');
       const mutationResponse = page.waitForResponse(

@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ownerApi, OwnerApiError, type OwnerIdentity, type ManagedOperator } from './api';
+import {
+  ownerApi,
+  OwnerApiError,
+  type OwnerIdentity,
+  type ManagedOperator,
+  merchantPermissions,
+  type MerchantPermission,
+} from './api';
 import '../styles.css';
 import './owner.css';
 
@@ -91,6 +98,16 @@ function Operators({
     return <Alert>Operator directory permission is required.</Alert>;
   return (
     <>
+      {view === 'operators' && identity.permissions.includes('platform.clients.manage') && (
+        <CreateMerchant
+          expired={expired}
+          created={(operator) => {
+            setOffset(0);
+            setSelected(operator.id);
+            setRevision((v) => v + 1);
+          }}
+        />
+      )}
       <section className="panel">
         <div className="panel-heading">
           <h2>Client operator directory</h2>
@@ -216,6 +233,11 @@ function OperatorDetails({
           {view === 'operators' && identity.permissions.includes('platform.clients.manage') && (
             <OperatorControls operator={state.value} expired={expired} changed={changed} />
           )}
+          {(view === 'accounts' || view === 'team') &&
+            identity.permissions.includes('platform.clients.bootstrap_admin') &&
+            state.value.status === 'active' && (
+              <AdministratorInvitation operator={state.value} expired={expired} />
+            )}
           {(view === 'accounts' || view === 'team') && (
             <Members target={target} expired={expired} />
           )}
@@ -223,6 +245,184 @@ function OperatorDetails({
             <WithdrawControls operator={state.value} expired={expired} changed={changed} />
           )}
         </>
+      )}
+    </section>
+  );
+}
+function useOwnerMutation(expired: (notice?: string) => void) {
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState<string>();
+  const pending = useRef(false),
+    live = useRef(true);
+  useEffect(
+    () => () => {
+      live.current = false;
+    },
+    [],
+  );
+  const run = async (work: () => Promise<void>) => {
+    if (pending.current) return;
+    pending.current = true;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await work();
+    } catch (e) {
+      // Uncertain/security outcomes belong to the app, even after this form unmounts.
+      if (e instanceof OwnerApiError && (e.status === 401 || e.status === 403)) expired();
+      else if (!(e instanceof OwnerApiError) || e.status >= 500)
+        expired(
+          'Change outcome not confirmed. Do not repeat it. Reconcile the current merchant or invitation records before making another change.',
+        );
+      else if (live.current) setError(failure(e));
+    } finally {
+      if (live.current) {
+        pending.current = false;
+        setBusy(false);
+      }
+    }
+  };
+  return { busy, error, run, live };
+}
+function CreateMerchant({
+  expired,
+  created,
+}: {
+  expired: (notice?: string) => void;
+  created: (operator: ManagedOperator) => void;
+}) {
+  const { busy, error, run, live } = useOwnerMutation(expired);
+  return (
+    <section className="panel owner-content">
+      <h2>Create merchant organization</h2>
+      <p className="muted">
+        Creates an empty client tenant only. No administrator, API key or payment is created. Fresh
+        owner verification is required.
+      </p>
+      {error && <Alert>{error}</Alert>}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          const data = new FormData(e.currentTarget);
+          const rawCode = data.get('code'),
+            rawName = data.get('name');
+          const code = typeof rawCode === 'string' ? rawCode : '',
+            name = typeof rawName === 'string' ? rawName.trim() : '';
+          if (!confirm('Create merchant organization ' + code + ' without credentials?')) return;
+          void run(async () => {
+            const result = await ownerApi.createMerchant({ code, name });
+            if (live.current) created(result.operator);
+          });
+        }}
+      >
+        <fieldset disabled={busy}>
+          <legend>New merchant identity</legend>
+          <label htmlFor="merchant-code">Immutable merchant code</label>
+          <input
+            id="merchant-code"
+            name="code"
+            required
+            minLength={3}
+            maxLength={64}
+            pattern="[a-z][a-z0-9_-]{2,63}"
+            autoComplete="off"
+          />
+          <label htmlFor="merchant-create-name">Merchant display name</label>
+          <input
+            id="merchant-create-name"
+            name="name"
+            required
+            minLength={1}
+            maxLength={120}
+            autoComplete="organization"
+          />
+          <button type="submit">{busy ? 'Creating merchant…' : 'Create merchant'}</button>
+        </fieldset>
+      </form>
+    </section>
+  );
+}
+function AdministratorInvitation({
+  operator,
+  expired,
+}: {
+  operator: ManagedOperator;
+  expired: (notice?: string) => void;
+}) {
+  const { busy, error, run, live } = useOwnerMutation(expired);
+  const [receipt, setReceipt] = useState<{ invitationId: string; expiresAt: string }>();
+  return (
+    <section className="owner-content">
+      <h3>Pending merchant administrator invitation</h3>
+      <p className="muted">
+        Activation is not available. This records reviewed invitation intent only: no account,
+        password, activation token or session is issued. Delivery and recovery require a separately
+        approved enrollment policy.
+      </p>
+      {error && <Alert>{error}</Alert>}
+      {receipt ? (
+        <p role="status">
+          Pending invitation {receipt.invitationId}. Expires{' '}
+          {new Date(receipt.expiresAt).toLocaleString()}. Activation remains disabled.
+        </p>
+      ) : (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const data = new FormData(e.currentTarget);
+            const rawUsername = data.get('username');
+            const username = typeof rawUsername === 'string' ? rawUsername : '';
+            const permissions = merchantPermissions.filter((p) =>
+              data.getAll('permissions').includes(p),
+            );
+            if (
+              !confirm(
+                'Record a pending administrator invitation for ' +
+                  operator.code +
+                  '? Activation will remain disabled.',
+              )
+            )
+              return;
+            void run(async () => {
+              const result = await ownerApi.inviteAdministrator(operator.id, {
+                username,
+                permissions,
+                terminalIds: [],
+              });
+              if (live.current) setReceipt(result);
+            });
+          }}
+        >
+          <fieldset disabled={busy}>
+            <legend>Explicit administrator authority request</legend>
+            <label htmlFor="administrator-username">Proposed administrator username</label>
+            <input
+              id="administrator-username"
+              name="username"
+              required
+              minLength={3}
+              maxLength={80}
+              pattern="[a-z0-9][a-z0-9_.-]{2,79}"
+              autoComplete="off"
+            />
+            <fieldset>
+              <legend>Requested permissions (bounded by current merchant entitlements)</legend>
+              {merchantPermissions.map((permission: MerchantPermission) => (
+                <label key={permission}>
+                  <input type="checkbox" name="permissions" value={permission} />
+                  {permission}
+                </label>
+              ))}
+            </fieldset>
+            <p className="muted">
+              No terminal authority is requested. No permission or account becomes active through
+              this form.
+            </p>
+            <button type="submit">
+              {busy ? 'Recording invitation…' : 'Record pending administrator invitation'}
+            </button>
+          </fieldset>
+        </form>
       )}
     </section>
   );
@@ -253,13 +453,13 @@ function OperatorControls({
       await work();
       if (live.current) changed();
     } catch (e) {
-      if (!live.current) return;
+      // Uncertain/security outcomes belong to the app, even after this form unmounts.
       if (e instanceof OwnerApiError && (e.status === 401 || e.status === 403)) expired();
       else if (!(e instanceof OwnerApiError) || e.status >= 500)
         expired(
           'Change outcome not confirmed. Do not repeat this change. Check the owner session and reload current records before making another change.',
         );
-      else setError(failure(e));
+      else if (live.current) setError(failure(e));
     } finally {
       if (live.current) setPending(false);
     }
@@ -370,8 +570,8 @@ function Members({ target, expired }: { target: string; expired: () => void }) {
         </>
       )}
       <p className="owner-content muted">
-        No administrator promotion, invitation, delegation or credential creation is available in
-        this foundation.
+        Membership history is retained. Pending administrator invitations require a separate
+        explicit owner permission; account activation and credential delivery remain unavailable.
       </p>
     </>
   );
@@ -408,13 +608,13 @@ function WithdrawControls({
       await ownerApi.withdraw(operator.id, permission, operator.version);
       if (live.current) changed();
     } catch (e) {
-      if (!live.current) return;
+      // Uncertain/security outcomes belong to the app, even after this form unmounts.
       if (e instanceof OwnerApiError && (e.status === 401 || e.status === 403)) expired();
       else if (!(e instanceof OwnerApiError) || e.status >= 500)
         expired(
           'Change outcome not confirmed. Do not repeat this change. Check the owner session and reload current records before making another change.',
         );
-      else setError(failure(e));
+      else if (live.current) setError(failure(e));
     } finally {
       if (live.current) setBusy(false);
     }

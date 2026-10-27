@@ -269,3 +269,65 @@ it('refuses owner routes in production even if a forged Config bypasses parsing'
   await request(server).get('/owner-api/clients').expect(404);
   expect(execute).not.toHaveBeenCalled();
 });
+
+it('creates merchant organizations without a key or browser-supplied owner identity', async () => {
+  await request(app())
+    .post('/owner-api/clients')
+    .set('Host', 'owner.example.invalid')
+    .set('X-Forwarded-Proto', 'https')
+    .set('Cookie', ownerCookie)
+    .set('Origin', origin)
+    .set('X-CSRF-Token', csrf)
+    .send({ code: 'synthetic-merchant', name: 'Synthetic Merchant' })
+    .expect(201);
+  expect(execute).toHaveBeenLastCalledWith(
+    expect.anything(),
+    expect.any(String),
+    {
+      action: 'operators.create',
+      code: 'synthetic-merchant',
+      name: 'Synthetic Merchant',
+      csrfHash: createHash('sha256').update(csrf).digest('hex'),
+    },
+    undefined,
+  );
+  execute.mockClear();
+  await request(app())
+    .post('/owner-api/clients')
+    .set('Host', 'owner.example.invalid')
+    .set('X-Forwarded-Proto', 'https')
+    .set('Cookie', ownerCookie)
+    .set('Origin', origin)
+    .set('X-CSRF-Token', csrf)
+    .send({ code: 'synthetic-merchant', name: 'Synthetic Merchant', ownerId: target })
+    .expect(400);
+  expect(execute).not.toHaveBeenCalled();
+});
+it('dispatches explicit administrator invitation intent without enrollment tokens or browser role elevation', async () => {
+  await request(app())
+    .post('/owner-api/clients/' + target + '/administrator-invitations')
+    .set('Host', 'owner.example.invalid')
+    .set('X-Forwarded-Proto', 'https')
+    .set('Cookie', ownerCookie)
+    .set('Origin', origin)
+    .set('X-CSRF-Token', csrf)
+    .send({
+      username: 'synthetic-admin',
+      permissions: ['client.users.manage_subaccounts'],
+      terminalIds: [],
+    })
+    .expect(201);
+  expect(execute).toHaveBeenLastCalledWith(
+    expect.anything(),
+    expect.any(String),
+    {
+      action: 'invitations.create_admin',
+      targetId: target,
+      username: 'synthetic-admin',
+      permissions: ['client.users.manage_subaccounts'],
+      terminalIds: [],
+      csrfHash: createHash('sha256').update(csrf).digest('hex'),
+    },
+    undefined,
+  );
+});

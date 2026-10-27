@@ -75,3 +75,53 @@ it('does not place private server error content in errors', async () => {
   );
   await expect(ownerApi.operators(0)).rejects.toEqual(new OwnerApiError(503));
 });
+
+it('creates credential-free merchants and validates pending-only invitation responses', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(response({ csrfToken: 'a'.repeat(64) }))
+    .mockResolvedValueOnce(response({ operator }))
+    .mockResolvedValueOnce(response({ csrfToken: 'b'.repeat(64) }))
+    .mockResolvedValueOnce(
+      response({
+        invitationId: target,
+        expiresAt: '2026-12-01T00:00:00.000Z',
+        status: 'pending',
+        activationEnabled: false,
+      }),
+    );
+  vi.stubGlobal('fetch', fetch);
+  await ownerApi.createMerchant({ code: 'synthetic', name: 'Synthetic' });
+  expect(fetch.mock.calls[1]?.[0]).toBe('/owner-api/clients');
+  expect(fetch.mock.calls[1]?.[1]).toMatchObject({
+    method: 'POST',
+    body: JSON.stringify({ code: 'synthetic', name: 'Synthetic' }),
+  });
+  await ownerApi.inviteAdministrator(target, {
+    username: 'synthetic.admin',
+    permissions: ['client.payments.read'],
+    terminalIds: [],
+  });
+  expect(fetch.mock.calls[3]?.[0]).toBe(
+    '/owner-api/clients/' + target + '/administrator-invitations',
+  );
+  const bad = vi
+    .fn()
+    .mockResolvedValueOnce(response({ csrfToken: 'a'.repeat(64) }))
+    .mockResolvedValueOnce(
+      response({
+        invitationId: target,
+        expiresAt: '2026-12-01T00:00:00.000Z',
+        status: 'pending',
+        activationEnabled: true,
+      }),
+    );
+  vi.stubGlobal('fetch', bad);
+  await expect(
+    ownerApi.inviteAdministrator(target, {
+      username: 'synthetic.admin',
+      permissions: [],
+      terminalIds: [],
+    }),
+  ).rejects.toMatchObject({ status: 502 });
+});

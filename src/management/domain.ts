@@ -2,10 +2,16 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 import { withReadClient } from '../db/read-client.js';
+import {
+  createMerchant,
+  createMerchantInvitation,
+  MERCHANT_PERMISSIONS,
+} from './merchant-domain.js';
 
 export const OWNER_PERMISSIONS = [
   'platform.clients.read',
   'platform.clients.manage',
+  'platform.clients.bootstrap_admin',
   'platform.audit.read',
 ] as const;
 export type ManagementCommand =
@@ -13,6 +19,15 @@ export type ManagementCommand =
   | { action: 'csrf.rotate'; newCsrfHash: string }
   | { action: 'logout'; csrfHash: string }
   | { action: 'operators.list'; limit: number; offset: number }
+  | { action: 'operators.create'; code: string; name: string; csrfHash: string }
+  | {
+      action: 'invitations.create_admin';
+      targetId: string;
+      username: string;
+      permissions: string[];
+      terminalIds: string[];
+      csrfHash: string;
+    }
   | { action: 'operators.detail'; targetId: string }
   | { action: 'members.list'; targetId: string; limit: number; offset: number }
   | { action: 'members.detail'; targetId: string; membershipId: string }
@@ -77,7 +92,10 @@ const memberDto = (row: MemberRow) => ({
   authorizationVersion: row.authorization_version,
 });
 const writes = (command: ManagementCommand) =>
-  command.action === 'operators.update' || command.action === 'entitlements.withdraw';
+  command.action === 'operators.update' ||
+  command.action === 'entitlements.withdraw' ||
+  command.action === 'operators.create' ||
+  command.action === 'invitations.create_admin';
 function valid(command: ManagementCommand): boolean {
   if (
     'targetId' in command &&
@@ -106,6 +124,28 @@ function valid(command: ManagementCommand): boolean {
   if (
     command.action === 'entitlements.withdraw' &&
     !['client.payments.read', 'client.status.read'].includes(command.permission)
+  )
+    return false;
+  if (
+    command.action === 'operators.create' &&
+    (!/^[a-z][a-z0-9_-]{2,63}$/.test(command.code) ||
+      !command.name.trim() ||
+      command.name.length > 120 ||
+      Array.from(command.name).some(
+        (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+      ))
+  )
+    return false;
+  if (
+    command.action === 'invitations.create_admin' &&
+    (!/^[a-z0-9][a-z0-9_.-]{2,79}$/.test(command.username) ||
+      command.permissions.length === 0 ||
+      command.permissions.length > MERCHANT_PERMISSIONS.length ||
+      new Set(command.permissions).size !== command.permissions.length ||
+      command.permissions.some((p) => !(MERCHANT_PERMISSIONS as readonly string[]).includes(p)) ||
+      command.terminalIds.length > 50 ||
+      new Set(command.terminalIds).size !== command.terminalIds.length ||
+      command.terminalIds.some((id) => !uuid.safeParse(id).success))
   )
     return false;
   if (command.action === 'operators.update') {
@@ -323,11 +363,14 @@ export async function executeManagement(
             authorizationVersion: actor.authorization_version,
           });
         }
-        const permission = writes(command)
-          ? 'platform.clients.manage'
-          : command.action === 'audit.list'
-            ? 'platform.audit.read'
-            : 'platform.clients.read';
+        const permission =
+          command.action === 'invitations.create_admin'
+            ? 'platform.clients.bootstrap_admin'
+            : writes(command)
+              ? 'platform.clients.manage'
+              : command.action === 'audit.list'
+                ? 'platform.audit.read'
+                : 'platform.clients.read';
         if (!permissions.includes(permission)) return denied('forbidden');
         if (
           writes(command) &&
@@ -358,9 +401,40 @@ export async function executeManagement(
             !matchesCsrf(command.csrfHash, active.csrf_hash))
         )
           return denied('forbidden');
+        let auditTarget = targetId;
+        let auditVersion = operator?.management_version;
         let value: unknown;
         let summary: Record<string, string | number | boolean> = {};
         switch (command.action) {
+          case 'operators.create': {
+            const created = await createMerchant(client, {
+              ownerId: actor.id,
+              code: command.code,
+              name: command.name.trim(),
+            });
+            value = created;
+            auditTarget = created.operator.id;
+            auditVersion = created.operator.version;
+            summary = { version: 1 };
+            break;
+          }
+          case 'invitations.create_admin': {
+            const invitation = await createMerchantInvitation(client, {
+              operatorId: targetId!,
+              ownerId: actor.id,
+              username: command.username,
+              kind: 'merchant_admin',
+              permissions: command.permissions,
+              terminalIds: command.terminalIds,
+            });
+            value = invitation;
+            summary = {
+              returned: 1,
+              invitationId: invitation.invitationId,
+              kind: 'merchant_admin',
+            };
+            break;
+          }
           case 'operators.list': {
             const result = await client.query<OperatorRow>(
               'SELECT id,code,name,status,management_version FROM public.operators ORDER BY id LIMIT $1 OFFSET $2',
@@ -522,8 +596,8 @@ export async function executeManagement(
           client,
           actor,
           command.action,
-          targetId,
-          operator?.management_version,
+          auditTarget,
+          operator?.management_version ?? auditVersion,
           summary,
           { policyVersion, mfaVerifiedAt: active.mfa_verified_at, requestId: correlation },
         );
