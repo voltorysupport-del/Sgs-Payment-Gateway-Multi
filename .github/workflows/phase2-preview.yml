@@ -28,7 +28,7 @@ jobs:
           python-version: '3.12'
       - name: Package isolated source; no application build or gateway configuration
         run: python scripts/package-phase2-preview.py "$RUNNER_TEMP/package"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: phase2-preview-candidate
           path: |
@@ -105,7 +105,7 @@ jobs:
       - name: Verify unchanged tested ZIP
         working-directory: verified
         run: sha256sum -c vaultx-pay-phase2-preview.zip.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vaultx-pay-phase2-preview-windows-download
           path: |
