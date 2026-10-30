@@ -80,7 +80,7 @@ jobs:
         run: npm run build
 
       - name: Upload synthetic dashboard screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dashboard-synthetic-screenshots
           path: test-results/dashboard/*.png
