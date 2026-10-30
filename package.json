@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "@simplewebauthn/server": "13.3.3",
-    "argon2": "^0.44.0",
+    "argon2": "^0.45.1",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
     "pg": "^8.23.1",
